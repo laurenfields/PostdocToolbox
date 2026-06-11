@@ -3,28 +3,24 @@ IGLON5,IGLON5,Y,Serum Evs,Found in 10 of 20 SALS patients,"Takahashi, K., Kato, 
 FET,FET,N,,,
 TARDBP,TDP-43,N,CSF/Blood/Plasma Evs,,"Zetterberg, H., Bendlin, B.B. Biofluid biomarkers in Alzheimer’s disease and other neurodegenerative dementias. Nature 650, 49–59 (2026). https://doi.org/10.1038/s41586-025-10018-w"
 HDGFL2,HDGFL2,Y,Blood,"ALS-FTD, SALS","Irwin, K.E., Jasin, P., Braunstein, K.E. et al. A fluid biomarker reveals loss of TDP-43 splicing repression in presymptomatic ALS–FTD. Nat Med 30, 382–393 (2024). https://doi.org/10.1038/s41591-023-02788-5"
-HDGFL2,HDGFL2,Y,CSF,"ALS-FTD, SALS","Irwin, K.E., Jasin, P., Braunstein, K.E. et al. A fluid biomarker reveals loss of TDP-43 splicing repression in presymptomatic ALS–FTD. Nat Med 30, 382–393 (2024). https://doi.org/10.1038/s41591-023-02788-5"
 NEFL,NfL,N,Blood/CSF,"General neurodegeneration, prominent in ALS","Zetterberg, H., Bendlin, B.B. Biofluid biomarkers in Alzheimer’s disease and other neurodegenerative dementias. Nature 650, 49–59 (2026). https://doi.org/10.1038/s41586-025-10018-w"
 MAPT,Tau,N,CSF,,"Honey, M.I.J., Hok-A-Hin, Y.S., Thijssen, E.H. et al. An acetylated Tau-174 CSF biomarker discriminates between TDP-43 and tau pathology in patients with frontotemporal lobar degeneration. Nat Med (2026). https://doi.org/10.1038/s41591-026-04341-6"
-GFAP,GFAP,N,CSF (weak signal in blood),General indicator of neuroinflammation and microglial reactivity,"Zetterberg, H., Bendlin, B.B. Biofluid biomarkers in Alzheimer’s disease and other neurodegenerative dementias. Nature 650, 49–59 (2026). https://doi.org/10.1038/s41586-025-10018-w"
+GFAP,GFAP,N,"CSF, blood","General indicator of neuroinflammation and microglial reactivity, AD/dementia staging biomarker","Zetterberg, H., Bendlin, B.B. Biofluid biomarkers in Alzheimer’s disease and other neurodegenerative dementias. Nature 650, 49–59 (2026). https://doi.org/10.1038/s41586-025-10018-w"
 TREM1,TREM1,N,CSF (weak signal in blood),General indicator of neuroinflammation and microglial reactivity,"Zetterberg, H., Bendlin, B.B. Biofluid biomarkers in Alzheimer’s disease and other neurodegenerative dementias. Nature 650, 49–59 (2026). https://doi.org/10.1038/s41586-025-10018-w"
 FABP3,FABP3,N,CSF (weak signal in blood),General indicator of neuroinflammation and microglial reactivity,"Zetterberg, H., Bendlin, B.B. Biofluid biomarkers in Alzheimer’s disease and other neurodegenerative dementias. Nature 650, 49–59 (2026). https://doi.org/10.1038/s41586-025-10018-w"
 S100A12,S100A12,N,CSF (weak signal in blood),General indicator of neuroinflammation and microglial reactivity,"Zetterberg, H., Bendlin, B.B. Biofluid biomarkers in Alzheimer’s disease and other neurodegenerative dementias. Nature 650, 49–59 (2026). https://doi.org/10.1038/s41586-025-10018-w"
 NRGN,Neurgranin,N,CSF,Specific for AD,"Zetterberg, H., Bendlin, B.B. Biofluid biomarkers in Alzheimer’s disease and other neurodegenerative dementias. Nature 650, 49–59 (2026). https://doi.org/10.1038/s41586-025-10018-w"
 SNAP25,SNAP-25,N,CSF,Specific for AD,"Zetterberg, H., Bendlin, B.B. Biofluid biomarkers in Alzheimer’s disease and other neurodegenerative dementias. Nature 650, 49–59 (2026). https://doi.org/10.1038/s41586-025-10018-w"
 NPTX2,NPTX2,N,CSF,Specifically decreased in AD,"Zetterberg, H., Bendlin, B.B. Biofluid biomarkers in Alzheimer’s disease and other neurodegenerative dementias. Nature 650, 49–59 (2026). https://doi.org/10.1038/s41586-025-10018-w"
-MAPT,Tau,N,Plasma Evs,ALS-FTD,"Chatterjee, M., Özdemir, S., Fritz, C. et al. Plasma extracellular vesicle tau and TDP-43 as diagnostic biomarkers in FTD and ALS. Nat Med 30, 1771–1783 (2024). https://doi.org/10.1038/s41591-024-02937-4"
 EWSR1,EWS,,CSF,FTD,"Sogorb-Esteve, A., Nilsson, J., Swift, I.J. et al. Differential impairment of cerebrospinal fluid synaptic biomarkers in the genetic forms of frontotemporal dementia. Alz Res Therapy 14, 118 (2022). https://doi.org/10.1186/s13195-022-01042-3"
 TAF15,TAF15,,CSF,FTD,"Sogorb-Esteve, A., Nilsson, J., Swift, I.J. et al. Differential impairment of cerebrospinal fluid synaptic biomarkers in the genetic forms of frontotemporal dementia. Alz Res Therapy 14, 118 (2022). https://doi.org/10.1186/s13195-022-01042-3"
-SNCB,Beta-synuclein,,CSF,FTD with MAPT mutation,"Sogorb-Esteve, A., Nilsson, J., Swift, I.J. et al. Differential impairment of cerebrospinal fluid synaptic biomarkers in the genetic forms of frontotemporal dementia. Alz Res Therapy 14, 118 (2022). https://doi.org/10.1186/s13195-022-01042-3"
+SNCB,Beta-synuclein,,"CSF, blood",FTD with MAPT mutation; AD,"Sogorb-Esteve, A., Nilsson, J., Swift, I.J. et al. Differential impairment of cerebrospinal fluid synaptic biomarkers in the genetic forms of frontotemporal dementia. Alz Res Therapy 14, 118 (2022). https://doi.org/10.1186/s13195-022-01042-3; Nilsson J, Cousins KAQ, Gobom J, Portelius E, Chen-Plotkin A, Shaw LM, Grossman M, Irwin DJ, Trojanowski JQ, Zetterberg H, Blennow K, Brinkmalm A. Cerebrospinal fluid biomarker panel of synaptic dysfunction in Alzheimer's disease and other neurodegenerative disorders. Alzheimers Dement. 2023 May;19(5):1775-1784. doi: 10.1002/alz.12809."
 SNCG,Gamma-synuclein,,CSF,FTD with MAPT mutation,"Sogorb-Esteve, A., Nilsson, J., Swift, I.J. et al. Differential impairment of cerebrospinal fluid synaptic biomarkers in the genetic forms of frontotemporal dementia. Alz Res Therapy 14, 118 (2022). https://doi.org/10.1186/s13195-022-01042-3"
 YWHAH,14-3-3 eta; modulates neurotransmission and known biomarker for CJD,,CSF,FTD with MAPT mutation,"Sogorb-Esteve, A., Nilsson, J., Swift, I.J. et al. Differential impairment of cerebrospinal fluid synaptic biomarkers in the genetic forms of frontotemporal dementia. Alz Res Therapy 14, 118 (2022). https://doi.org/10.1186/s13195-022-01042-3"
-NRGN,Neurgranin,,CSF,FTD with MAPT mutation,"Sogorb-Esteve, A., Nilsson, J., Swift, I.J. et al. Differential impairment of cerebrospinal fluid synaptic biomarkers in the genetic forms of frontotemporal dementia. Alz Res Therapy 14, 118 (2022). https://doi.org/10.1186/s13195-022-01042-3"
 GDI1,Rab GDI alpha,,CSF,FTD with MAPT mutation,"Sogorb-Esteve, A., Nilsson, J., Swift, I.J. et al. Differential impairment of cerebrospinal fluid synaptic biomarkers in the genetic forms of frontotemporal dementia. Alz Res Therapy 14, 118 (2022). https://doi.org/10.1186/s13195-022-01042-3"
 STX1B,Syntaxin 1B,,CSF,FTD with MAPT mutation,"Sogorb-Esteve, A., Nilsson, J., Swift, I.J. et al. Differential impairment of cerebrospinal fluid synaptic biomarkers in the genetic forms of frontotemporal dementia. Alz Res Therapy 14, 118 (2022). https://doi.org/10.1186/s13195-022-01042-3"
 STX7,Syntaxin-7,,CSF,FTD with MAPT mutation,"Sogorb-Esteve, A., Nilsson, J., Swift, I.J. et al. Differential impairment of cerebrospinal fluid synaptic biomarkers in the genetic forms of frontotemporal dementia. Alz Res Therapy 14, 118 (2022). https://doi.org/10.1186/s13195-022-01042-3"
 PEBP1,PEBP-1,,CSF,FTD with MAPT mutation,"Sogorb-Esteve, A., Nilsson, J., Swift, I.J. et al. Differential impairment of cerebrospinal fluid synaptic biomarkers in the genetic forms of frontotemporal dementia. Alz Res Therapy 14, 118 (2022). https://doi.org/10.1186/s13195-022-01042-3"
-NEFL,NEFL,,Plasma (via Olink); CSF (via SomaScan),ALS,"Chia, R., Moaddel, R., Kwan, J.Y. et al. A plasma proteomics-based candidate biomarker panel predictive of amyotrophic lateral sclerosis. Nat Med 31, 3440–3450 (2025). https://doi.org/10.1038/s41591-025-03890-6"
 ALDH3A1,ALDH3A1,,Plasma (via Olink),ALS,"Chia, R., Moaddel, R., Kwan, J.Y. et al. A plasma proteomics-based candidate biomarker panel predictive of amyotrophic lateral sclerosis. Nat Med 31, 3440–3450 (2025). https://doi.org/10.1038/s41591-025-03890-6"
 MEGF10,MEGF10,,Plasma (via Olink); CSF (via SomaScan),ALS,"Chia, R., Moaddel, R., Kwan, J.Y. et al. A plasma proteomics-based candidate biomarker panel predictive of amyotrophic lateral sclerosis. Nat Med 31, 3440–3450 (2025). https://doi.org/10.1038/s41591-025-03890-6"
 CORO6,CORO6,,Plasma (via Olink),ALS,"Chia, R., Moaddel, R., Kwan, J.Y. et al. A plasma proteomics-based candidate biomarker panel predictive of amyotrophic lateral sclerosis. Nat Med 31, 3440–3450 (2025). https://doi.org/10.1038/s41591-025-03890-6"
@@ -41,7 +37,7 @@ ACTN2,ACTN2,,Plasma (via Olink),ALS,"Chia, R., Moaddel, R., Kwan, J.Y. et al. A 
 ART3,ART3,,Plasma (via Olink),ALS,"Chia, R., Moaddel, R., Kwan, J.Y. et al. A plasma proteomics-based candidate biomarker panel predictive of amyotrophic lateral sclerosis. Nat Med 31, 3440–3450 (2025). https://doi.org/10.1038/s41591-025-03890-6"
 HSPB6,HSPB6,,Plasma (via Olink); CSF (via SomaScan),ALS,"Chia, R., Moaddel, R., Kwan, J.Y. et al. A plasma proteomics-based candidate biomarker panel predictive of amyotrophic lateral sclerosis. Nat Med 31, 3440–3450 (2025). https://doi.org/10.1038/s41591-025-03890-6"
 DTNB,DTNB,,Plasma (via Olink),ALS,"Chia, R., Moaddel, R., Kwan, J.Y. et al. A plasma proteomics-based candidate biomarker panel predictive of amyotrophic lateral sclerosis. Nat Med 31, 3440–3450 (2025). https://doi.org/10.1038/s41591-025-03890-6"
-MB,MB,,Plasma (via Olink),ALS,"Chia, R., Moaddel, R., Kwan, J.Y. et al. A plasma proteomics-based candidate biomarker panel predictive of amyotrophic lateral sclerosis. Nat Med 31, 3440–3450 (2025). https://doi.org/10.1038/s41591-025-03890-6"
+MB,MB,,Plasma (via Olink); CSF (via SomaScan),ALS,"Chia, R., Moaddel, R., Kwan, J.Y. et al. A plasma proteomics-based candidate biomarker panel predictive of amyotrophic lateral sclerosis. Nat Med 31, 3440–3450 (2025). https://doi.org/10.1038/s41591-025-03890-6"
 NEB,NEB,,Plasma (via Olink),ALS,"Chia, R., Moaddel, R., Kwan, J.Y. et al. A plasma proteomics-based candidate biomarker panel predictive of amyotrophic lateral sclerosis. Nat Med 31, 3440–3450 (2025). https://doi.org/10.1038/s41591-025-03890-6"
 MYL3,MYL3,,Plasma (via Olink),ALS,"Chia, R., Moaddel, R., Kwan, J.Y. et al. A plasma proteomics-based candidate biomarker panel predictive of amyotrophic lateral sclerosis. Nat Med 31, 3440–3450 (2025). https://doi.org/10.1038/s41591-025-03890-6"
 KLHL41,KLHL41,,Plasma (via Olink),ALS,"Chia, R., Moaddel, R., Kwan, J.Y. et al. A plasma proteomics-based candidate biomarker panel predictive of amyotrophic lateral sclerosis. Nat Med 31, 3440–3450 (2025). https://doi.org/10.1038/s41591-025-03890-6"
@@ -73,8 +69,6 @@ CHAD,CHAD,,CSF,Early stage ALS marker,"Neža Cankar, Filippa L. Qvist, Anne S. F
 medRxiv 2026.04.13.26350753; doi: https://doi.org/10.64898/2026.04.13.26350753"
 RELN,RELN,,CSF,Early stage ALS marker,"Neža Cankar, Filippa L. Qvist, Anne S. Frahm, Katrine Pilely, Kirsten Svenstrup, Stephen Wørlich Pedersen, Anne-Lene Kjældgaard, Peter Garred, Niels Henning Skotte
 medRxiv 2026.04.13.26350753; doi: https://doi.org/10.64898/2026.04.13.26350753"
-MB,MB,,CSF,ALS,"Neža Cankar, Filippa L. Qvist, Anne S. Frahm, Katrine Pilely, Kirsten Svenstrup, Stephen Wørlich Pedersen, Anne-Lene Kjældgaard, Peter Garred, Niels Henning Skotte
-medRxiv 2026.04.13.26350753; doi: https://doi.org/10.64898/2026.04.13.26350753"
 ITLN1,ITLN1,,CSF,ALS,"Neža Cankar, Filippa L. Qvist, Anne S. Frahm, Katrine Pilely, Kirsten Svenstrup, Stephen Wørlich Pedersen, Anne-Lene Kjældgaard, Peter Garred, Niels Henning Skotte
 medRxiv 2026.04.13.26350753; doi: https://doi.org/10.64898/2026.04.13.26350753"
 YWHAG,YWHAG,,CSF,ALS,"Neža Cankar, Filippa L. Qvist, Anne S. Frahm, Katrine Pilely, Kirsten Svenstrup, Stephen Wørlich Pedersen, Anne-Lene Kjældgaard, Peter Garred, Niels Henning Skotte
@@ -83,3 +77,53 @@ FCGR3A,FCGR3A,,CSF,ALS,"Neža Cankar, Filippa L. Qvist, Anne S. Frahm, Katrine P
 medRxiv 2026.04.13.26350753; doi: https://doi.org/10.64898/2026.04.13.26350753"
 PGAM1,PGAM1,,CSF,ALS,"Neža Cankar, Filippa L. Qvist, Anne S. Frahm, Katrine Pilely, Kirsten Svenstrup, Stephen Wørlich Pedersen, Anne-Lene Kjældgaard, Peter Garred, Niels Henning Skotte
 medRxiv 2026.04.13.26350753; doi: https://doi.org/10.64898/2026.04.13.26350753"
+PTPRB,PTPRB,,Blood,AD,"Felipe Cabral-Miranda, NeuroMarkers,2026,https://doi.org/10.1016/j.neumar.2026.100168."
+GJA5,CXA5,,Blood,AD,"Felipe Cabral-Miranda, NeuroMarkers,2026,https://doi.org/10.1016/j.neumar.2026.100168."
+KCNJ8,KCNJ8,,Blood,AD,"Felipe Cabral-Miranda, NeuroMarkers,2026,https://doi.org/10.1016/j.neumar.2026.100168."
+ADAMTS13,ATS13 (vWF),,Blood,AD,"Felipe Cabral-Miranda, NeuroMarkers,2026,https://doi.org/10.1016/j.neumar.2026.100168."
+APOA1,ApoA1,,Blood,AD,"Felipe Cabral-Miranda, NeuroMarkers,2026,https://doi.org/10.1016/j.neumar.2026.100168."
+VCAM1,VCAM1,,Blood,AD,"Felipe Cabral-Miranda, NeuroMarkers,2026,https://doi.org/10.1016/j.neumar.2026.100168."
+ICAM1,ICAM1,,Blood,AD,"Felipe Cabral-Miranda, NeuroMarkers,2026,https://doi.org/10.1016/j.neumar.2026.100168."
+SNCA,?-Synuclein,,Blood,PD,"Felipe Cabral-Miranda, NeuroMarkers,2026,https://doi.org/10.1016/j.neumar.2026.100168."
+TUBB3,Tubulin,,,HD/PD/ALS,"Cyske Z, Gaffke L, Pierzynowska K, W?grzyn G. Tubulin Cytoskeleton in Neurodegenerative Diseases-not Only Primary Tubulinopathies. Cell Mol Neurobiol. 2023 Jul;43(5):1867-1884. doi: 10.1007/s10571-022-01304-6."
+SYP,Synaptophysin,,"Blood, CSF",AD/FTD,
+GAD1,,,,GABAergic,
+MAP2,,,,Neurons,
+SHANK2,,,,,
+SHANK1,,,,,
+SHANK3,,,,,
+GAD2,,,,,
+VAMP2,,,,,
+HOMER1,,,,,
+SYN1,,,,,
+DLG4,,,,,
+APOE,,,,,
+SMOC1,,,,,
+ALDH1L1,,,,,
+OLIG1,,,,,
+OLIG2,,,,,
+S100B,,,,,
+NEFH,,,,,
+CLDN11,,,,,
+CA2,,,,,
+MAG,,,,,
+MOG,,,,,
+CNP,,,,,
+PLP1,,,,,
+MBP,,,,,
+PVALB,,,,,
+AIF1,,,,,
+HEXB,,,,,
+APP,,,,,https://doi.org/10.1016/j.arr.2024.102642
+PSEN1,,,,AD,https://doi.org/10.1016/j.arr.2024.102642
+PSEN2,,,,AD,https://doi.org/10.1016/j.arr.2024.102642
+SYNJ1,,,,PD,https://doi.org/10.1016/j.arr.2024.102642
+DNAJC6,,,,PD,https://doi.org/10.1016/j.arr.2024.102642
+DNAJC13,,,,PD,https://doi.org/10.1016/j.arr.2024.102642
+HTT,,,,HD,https://doi.org/10.1016/j.arr.2024.102642
+C9ORF72,,,,ALS/FTD,https://doi.org/10.1016/j.arr.2024.102642
+SOD1,,,,ALS,https://doi.org/10.1016/j.arr.2024.102642
+FUS,,,,ALS,https://doi.org/10.1016/j.arr.2024.102642
+GRN,,,,FTD,https://doi.org/10.1016/j.arr.2024.102642
+GAP-43,,,,AD,https://doi.org/10.1016/j.arr.2024.102642
+,,,,,
