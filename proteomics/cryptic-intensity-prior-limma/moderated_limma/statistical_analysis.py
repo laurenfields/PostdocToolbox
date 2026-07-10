@@ -1,0 +1,2397 @@
+"""
+Statistical Analysis Module for Proteomics Data
+
+This module provides a clean, configuration-driven approach to differential
+protein expression analysis with support for various statistical methods.
+"""
+
+import warnings
+
+import numpy as np
+import pandas as pd
+from scipy.stats import mannwhitneyu, ttest_1samp, ttest_ind, wilcoxon
+from statsmodels.stats.multitest import multipletests
+
+from .normalization import is_normalization_log_transformed
+from .preprocessing import _normalize_group_value
+
+# Try to import statsmodels for mixed-effects models
+try:
+    from statsmodels.formula.api import mixedlm
+
+    HAS_STATSMODELS = True
+except ImportError:
+    HAS_STATSMODELS = False
+    mixedlm = None
+    warnings.warn("statsmodels not available. Mixed-effects models will be disabled.")
+
+
+def _sanitize_formula_term(term):
+    """
+    Sanitize a column name for use in statsmodels formulas.
+    Wraps terms containing spaces or special characters in Q().
+
+    Parameters:
+    -----------
+    term : str
+        Column name to sanitize
+
+    Returns:
+    --------
+    str
+        Sanitized term safe for use in formulas
+    """
+    # Check if term needs quoting (contains spaces or special characters)
+    if " " in term or any(char in term for char in [":", "-", "+", "*", "/", "(", ")", "[", "]"]):
+        return f'Q("{term}")'
+    return term
+
+
+def _apply_log_transformation_if_needed(data, config):
+    """
+    Apply log transformation to data if needed based on configuration.
+    Uses existing normalization infrastructure to determine if data is already log-transformed.
+
+    Parameters:
+    -----------
+    data : pd.DataFrame
+        Input data with numeric columns to potentially transform
+    config : StatisticalConfig
+        Configuration object containing log transformation settings
+
+    Returns:
+    --------
+    pd.DataFrame
+        Data with log transformation applied if needed
+    """
+    # Get numeric columns (sample data)
+    numeric_columns = data.select_dtypes(include=[np.number]).columns.tolist()
+
+    if config.log_transform_before_stats == "auto":
+        # Use existing normalization infrastructure to determine if data is already log-transformed
+        if hasattr(config, "normalization_method") and config.normalization_method:
+            already_log_transformed = is_normalization_log_transformed(config.normalization_method)
+
+            if already_log_transformed:
+                apply_log_transform = False
+                print(
+                    f"Log transformation: AUTO-DETECTED "
+                    f"(not needed - {config.normalization_method} already log-transforms data)"
+                )
+            else:
+                apply_log_transform = True
+                print(
+                    f"Log transformation: AUTO-DETECTED "
+                    f"(needed - {config.normalization_method} preserves original scale)"
+                )
+        else:
+            # No normalization method info, check data range as fallback
+            if numeric_columns:
+                sample_data_range = data[numeric_columns]
+                mean_value = sample_data_range.mean().mean()
+                apply_log_transform = mean_value > 50
+                status = "needed" if apply_log_transform else "not needed"
+                print(f"Log transformation: AUTO-DETECTED ({status} - mean value {mean_value:.1f})")
+            else:
+                apply_log_transform = False
+                print("Log transformation: AUTO-DETECTED (no numeric columns found)")
+
+    elif str(config.log_transform_before_stats).lower() in ["true", "1", "yes", "on"]:
+        apply_log_transform = True
+        print("Log transformation: ENABLED (forced by configuration)")
+    else:
+        apply_log_transform = False
+        print("Log transformation: DISABLED (by configuration)")
+
+    if not apply_log_transform or not numeric_columns:
+        print("Using data as-is for statistical analysis")
+        return data
+
+    # Apply log transformation
+    print(f"Applying {config.log_base} transformation for statistical analysis...")
+
+    # Create a copy to avoid modifying original data
+    transformed_data = data.copy()
+    sample_data_subset = transformed_data[numeric_columns]
+
+    # Handle negative values if any exist
+    if (sample_data_subset < 0).any().any():
+        print("  -> Handling negative values...")
+        min_val = sample_data_subset.min().min()
+        shift_amount = abs(min_val) + 1
+        transformed_data[numeric_columns] = transformed_data[numeric_columns] + shift_amount
+        print(f"     Shifted all values by +{shift_amount:.2f}")
+
+    # Determine pseudocount
+    if config.log_pseudocount is None:
+        pseudocount = max(1e-6, sample_data_subset.min().min() / 100) if sample_data_subset.min().min() > 0 else 0.1
+    else:
+        pseudocount = config.log_pseudocount
+
+    # Apply appropriate log transformation
+    if config.log_base == "log2":
+        transformed_data[numeric_columns] = np.log2(transformed_data[numeric_columns] + pseudocount)
+    elif config.log_base == "log10":
+        transformed_data[numeric_columns] = np.log10(transformed_data[numeric_columns] + pseudocount)
+    elif config.log_base == "ln":
+        transformed_data[numeric_columns] = np.log(transformed_data[numeric_columns] + pseudocount)
+    else:
+        raise ValueError(f"Unknown log base: {config.log_base}")
+
+    print(f"  -> Applied {config.log_base} transformation with pseudocount {pseudocount}")
+
+    # Verify transformation
+    new_mean = transformed_data[numeric_columns].mean().mean()
+    print(
+        f"  -> New data range: {transformed_data[numeric_columns].min().min():.2f}"
+        f" to {transformed_data[numeric_columns].max().max():.2f}"
+    )
+    print(f"  -> New mean: {new_mean:.2f}")
+
+    return transformed_data
+
+
+class StatisticalConfig:
+    """Configuration class for statistical analysis parameters
+
+    Supports multiple analysis types:
+    - 'paired': Paired group comparison (requires group_column, paired_label1, paired_label2)
+    - 'unpaired': Unpaired group comparison (requires group_column, group_labels)
+    - 'linear_trend': Linear trend over time/dose (requires time_column, tests slope != 0)
+    - 'longitudinal': Any change over time (requires time_column, F-test on time as factor)
+    - 'interaction': Group × Time interaction (requires group_column, paired_column, interaction_terms)
+
+    Note: 'dose_response' is accepted as an alias for 'linear_trend' for backward compatibility.
+    """
+
+    def __init__(self):
+        # Basic analysis parameters
+        self.statistical_test_method = "mixed_effects"
+        self.analysis_type = (
+            None  # Must be set by user: 'paired', 'unpaired', 'linear_trend', 'longitudinal', 'interaction'
+        )
+        self.p_value_threshold = 0.05
+        self.fold_change_threshold = 1.5
+
+        # Experimental design - set based on analysis type
+        self.subject_column = None  # Required for mixed-effects models
+        self.time_column = None  # For linear_trend/longitudinal analysis (Week, Time, etc.)
+        self.dose_column = None  # Alias for time_column (backward compatibility)
+
+        # Group comparison parameters (for paired/unpaired/interaction analyses)
+        self.group_column = None
+        self.group_labels = []
+
+        # Paired comparison parameters (for paired analysis)
+        self.paired_column = None
+        self.paired_label1 = None
+        self.paired_label2 = None
+
+        # Mixed-effects specific
+        self.interaction_terms = []
+        self.additional_interactions = []
+        self.covariates = []
+
+        # Variable treatment control
+        self.force_categorical = False  # True to treat numeric variables as categorical factors
+
+        # T-test variance assumption
+        self.assume_equal_variance = False  # True for Student's t-test, False for Welch's t-test
+
+        # Multiple testing correction
+        self.correction_method = "fdr_bh"
+
+        # P-value selection parameters
+        self.use_adjusted_pvalue = "adjusted"  # "adjusted" or "unadjusted"
+        self.enable_pvalue_fallback = True
+
+        # Log transformation parameters
+        self.log_transform_before_stats = "auto"  # "auto", True, False
+        self.log_base = "log2"  # "log2", "log10", "ln"
+        self.log_pseudocount = None  # None for auto, or specific value
+
+        # Normalization method (used for auto log transformation)
+        self.normalization_method = None  # Set this to the normalization method used
+
+        # Peptide-count column for ``moderation="deqms"`` variance shrinkage.
+        # PRISM's protein parquet emits "n_peptides" by default.
+        self.peptide_count_column = "n_peptides"
+
+        # Moderated linear-model settings (used when
+        # ``statistical_test_method="moderated_linear_model"``).
+        # ``moderation`` selects the variance prior:
+        #   - "limma"             : global prior (Smyth 2004)
+        #   - "deqms"             : per-feature prior conditioned on peptide count (Zhu 2020)
+        #   - "intensity_trend"   : per-feature prior conditioned on mean-intensity trend;
+        #                           equivalent to limma's ``trend=TRUE`` and the recommended
+        #                           default for DIA/DDA MS data.
+        # ``robust`` enables Huber-style Winsorization of per-feature log(s^2) when
+        # estimating the prior hyperparameters, matching limma's ``robust=TRUE``.
+        self.moderation = "intensity_trend"
+        self.robust = False
+
+    def validate(self):
+        """Validate that required parameters are set for the chosen analysis type"""
+        if not self.analysis_type:
+            raise ValueError(
+                "analysis_type must be set. Choose: 'paired', 'unpaired', "
+                "'linear_trend', 'longitudinal', or 'interaction'"
+            )
+
+        # Get time column (time_column preferred, dose_column for backward compatibility)
+        time_col = self.time_column or self.dose_column
+
+        # Validate linear_trend analysis (formerly dose_response)
+        if self.analysis_type in ("linear_trend", "dose_response"):
+            if not time_col:
+                raise ValueError("linear_trend analysis requires time_column to be set")
+            if self.statistical_test_method == "mixed_effects" and not self.subject_column:
+                raise ValueError("Mixed-effects linear_trend analysis requires subject_column")
+
+        # Validate longitudinal analysis (F-test for any change over time)
+        elif self.analysis_type == "longitudinal":
+            if not time_col:
+                raise ValueError("longitudinal analysis requires time_column to be set")
+            if self.statistical_test_method == "mixed_effects" and not self.subject_column:
+                raise ValueError("Mixed-effects longitudinal analysis requires subject_column")
+
+        # Validate paired group comparison
+        elif self.analysis_type == "paired":
+            if not self.group_column or not self.group_labels:
+                raise ValueError("paired analysis requires group_column and group_labels")
+            if self.paired_label1 is None or self.paired_label2 is None:
+                raise ValueError("paired analysis requires paired_label1 and paired_label2")
+            if self.statistical_test_method == "mixed_effects" and not self.subject_column:
+                raise ValueError("Mixed-effects paired analysis requires subject_column")
+
+        # Validate unpaired group comparison
+        elif self.analysis_type == "unpaired":
+            if not self.group_column or not self.group_labels:
+                raise ValueError("unpaired analysis requires group_column and group_labels")
+
+        # Validate interaction analysis
+        elif self.analysis_type == "interaction":
+            if not self.group_column or not self.group_labels:
+                raise ValueError("interaction analysis requires group_column and group_labels")
+            if not self.paired_column:
+                raise ValueError("interaction analysis requires paired_column")
+            if not self.interaction_terms:
+                raise ValueError("interaction analysis requires interaction_terms")
+            if self.statistical_test_method == "mixed_effects" and not self.subject_column:
+                raise ValueError("Mixed-effects interaction analysis requires subject_column")
+
+        return True
+
+
+def prepare_metadata_dataframe(sample_metadata_dict, sample_columns, config):
+    """Convert sample metadata dictionary to DataFrame suitable for analysis"""
+
+    print(f"Preparing metadata for {len(sample_columns)} samples...")
+
+    # Create DataFrame from metadata dictionary
+    metadata_rows = []
+    for sample_name in sample_columns:
+        if sample_name in sample_metadata_dict:
+            row = sample_metadata_dict[sample_name].copy()
+            row["Sample"] = sample_name
+            metadata_rows.append(row)
+        else:
+            print(f"Warning: No metadata found for sample {sample_name}")
+
+    if not metadata_rows:
+        print("Warning: No metadata found for any samples - returning empty DataFrame")
+        # Return empty DataFrame with expected columns for graceful handling
+        expected_cols = ["Sample"]
+        if config.subject_column:
+            expected_cols.append(config.subject_column)
+        if config.paired_column:
+            expected_cols.append(config.paired_column)
+        if hasattr(config, "group_column") and config.group_column:
+            expected_cols.append(config.group_column)
+        return pd.DataFrame(columns=expected_cols)
+
+    metadata_df = pd.DataFrame(metadata_rows)
+
+    # Skip validation if no data (graceful handling for edge cases)
+    if len(metadata_df) == 0:
+        print("Empty metadata - skipping validation")
+        return metadata_df
+
+    # Build list of required columns based on analysis configuration
+    required_cols = []
+
+    # Subject column is always required for mixed-effects models
+    if config.subject_column:
+        required_cols.append(config.subject_column)
+
+    # Paired/time column is usually required
+    if config.paired_column:
+        required_cols.append(config.paired_column)
+
+    # Group column is only required for group comparison analyses
+    # NOT required for dose-response or continuous predictor models
+    if hasattr(config, "group_column") and config.group_column:
+        # Only require if we're using interaction terms that include the group column
+        # or if analysis_type indicates group comparison
+        if (config.interaction_terms and config.group_column in config.interaction_terms) or (
+            hasattr(config, "analysis_type") and config.analysis_type in ["paired", "unpaired"]
+        ):
+            required_cols.append(config.group_column)
+
+    # Validate required columns exist
+    missing_cols = [col for col in required_cols if col not in metadata_df.columns]
+    if missing_cols:
+        raise ValueError(f"Missing required metadata columns: {missing_cols}")
+
+    # CRITICAL: Filter out samples with missing values in required columns
+    print(f"  Before filtering: {len(metadata_df)} samples")
+    for col in required_cols:
+        before_count = len(metadata_df)
+        metadata_df = metadata_df.dropna(subset=[col])
+        after_count = len(metadata_df)
+        if before_count != after_count:
+            print(f"  Removed {before_count - after_count} samples missing {col}")
+
+    if len(metadata_df) == 0:
+        raise ValueError("No samples remain after filtering for required metadata")
+
+    print(f"  After filtering: {len(metadata_df)} samples")
+
+    # Only print subject info if subject_column is defined
+    if config.subject_column and config.subject_column in metadata_df.columns:
+        print(f"  Subjects: {metadata_df[config.subject_column].nunique()}")
+
+    # Only print group info if group_column is defined and exists in metadata
+    if hasattr(config, "group_column") and config.group_column and config.group_column in metadata_df.columns:
+        print(f"  Groups: {metadata_df[config.group_column].value_counts().to_dict()}")
+
+        # Handle categorical vs continuous variable treatment
+        if hasattr(config, "force_categorical") and config.force_categorical:
+            # Convert group column to categorical (string) type to force statsmodels to treat as factors
+            metadata_df[config.group_column] = metadata_df[config.group_column].astype(str)
+            print("  Group variable treatment: CATEGORICAL (converted to string factors)")
+        else:
+            # Ensure group column preserves numeric type if possible (for continuous treatment)
+            # Apply normalization to ensure consistency but preserve numeric types
+            metadata_df[config.group_column] = metadata_df[config.group_column].apply(_normalize_group_value)
+            group_col_type = metadata_df[config.group_column].dtype
+            print(f"  Group variable treatment: CONTINUOUS (type: {group_col_type})")
+
+    if config.paired_column and config.paired_column in metadata_df.columns:
+        print(f"  Timepoints: {metadata_df[config.paired_column].value_counts().to_dict()}")
+
+    return metadata_df
+
+
+def run_paired_t_test(protein_data, metadata_df, config):
+    """Run paired t-test analysis"""
+
+    print("Running paired t-test analysis...")
+
+    results = []
+    n_proteins = len(protein_data)
+
+    for i, (protein_idx, protein_values) in enumerate(protein_data.iterrows()):
+        if (i + 1) % 200 == 0:
+            print(f"  Processed {i + 1}/{n_proteins} proteins...")
+
+        # Get data for this protein
+        protein_df = pd.DataFrame({"Sample": protein_values.index, "Intensity": protein_values.values})
+
+        # Merge with metadata
+        protein_df = protein_df.merge(metadata_df, on="Sample", how="inner")
+
+        # Remove missing values
+        protein_df = protein_df.dropna(subset=["Intensity"])
+
+        if len(protein_df) < 4:  # Need at least some data
+            results.append(_create_empty_result(protein_idx, "Insufficient data"))
+            continue
+
+        # Calculate paired differences for each subject
+        baseline_data = protein_df[protein_df[config.paired_column] == config.paired_label1]
+        followup_data = protein_df[protein_df[config.paired_column] == config.paired_label2]
+
+        # Merge on subject to get paired data
+        paired_data = baseline_data.merge(followup_data, on=config.subject_column, suffixes=("_baseline", "_followup"))
+
+        if len(paired_data) < 3:  # Need at least 3 pairs
+            results.append(_create_empty_result(protein_idx, "Insufficient paired data"))
+            continue
+
+        # Calculate differences (followup - baseline)
+        differences = paired_data["Intensity_followup"] - paired_data["Intensity_baseline"]
+
+        try:
+            # Paired t-test (test if mean difference != 0)
+            t_stat, p_value = ttest_1samp(differences, 0)
+
+            # Calculate effect size (Cohen's d for paired data)
+            mean_diff = differences.mean()
+            std_diff = differences.std()
+            cohens_d = mean_diff / std_diff if std_diff > 0 else 0
+
+            # Log fold change (approximate)
+            log_fc = mean_diff  # Already in log-like space if VSN normalized
+
+            result = {
+                "Protein": protein_idx,
+                "logFC": log_fc,
+                "AveExpr": protein_df["Intensity"].mean(),
+                "t": t_stat,
+                "P.Value": p_value,
+                "B": np.nan,  # Not applicable for t-test
+                "n_pairs": len(paired_data),
+                "mean_diff": mean_diff,
+                "std_diff": std_diff,
+                "cohens_d": cohens_d,
+                "test_method": "Paired t-test",
+            }
+
+            results.append(result)
+
+        except (ValueError, RuntimeError, ZeroDivisionError) as e:
+            results.append(_create_empty_result(protein_idx, f"Analysis failed: {e}"))
+
+    print(f"Done: Paired t-test completed for {len(results)} proteins")
+    return pd.DataFrame(results)
+
+
+def compute_paired_fold_changes(protein_data, sample_metadata, config):
+    """Compute per-subject fold-changes (post minus pre) for each protein.
+
+    Returns a DataFrame with subjects as rows and proteins as columns,
+    where each value is the difference (paired_label2 - paired_label1)
+    for that subject and protein. Useful for downstream classification
+    or clustering of subjects based on protein response profiles.
+
+    Args:
+        protein_data: DataFrame with proteins as rows, samples as columns.
+            First 5 columns are annotations (Protein, Description, etc.),
+            remaining columns are sample intensities.
+        sample_metadata: Dict mapping sample column names to metadata dicts.
+            Each dict must contain the keys specified by config.subject_column
+            and config.paired_column.
+        config: StatisticalConfig with paired_column, paired_label1,
+            paired_label2, and subject_column set.
+
+    Returns:
+        DataFrame with subjects as rows (index = subject IDs) and proteins
+        as columns (column names = protein identifiers from the data index).
+        Values are fold-changes (paired_label2 - paired_label1) in the same
+        scale as the input data (log2 if input is log2-transformed).
+    """
+    # Build metadata DataFrame from dict
+    meta_records = []
+    for sample_name, meta in sample_metadata.items():
+        record = dict(meta)
+        record["Sample"] = sample_name
+        meta_records.append(record)
+    metadata_df = pd.DataFrame(meta_records)
+
+    # Ensure paired column values are comparable
+    metadata_df[config.paired_column] = metadata_df[config.paired_column].apply(
+        lambda x: float(x) if isinstance(x, (int, float, np.integer, np.floating)) else x
+    )
+
+    # Filter to samples with valid subject and timepoint
+    valid_mask = metadata_df[config.subject_column].notna() & metadata_df[config.paired_column].notna()
+    metadata_df = metadata_df[valid_mask]
+
+    # Split by timepoint
+    baseline = metadata_df[metadata_df[config.paired_column] == config.paired_label1].set_index(config.subject_column)
+    followup = metadata_df[metadata_df[config.paired_column] == config.paired_label2].set_index(config.subject_column)
+
+    # Find subjects present at both timepoints
+    paired_subjects = baseline.index.intersection(followup.index)
+    if len(paired_subjects) == 0:
+        raise ValueError(
+            f"No paired subjects found. Check that config.paired_label1="
+            f"{config.paired_label1} and config.paired_label2="
+            f"{config.paired_label2} match values in the "
+            f"'{config.paired_column}' column."
+        )
+
+    print(f"Computing per-subject fold-changes for {len(paired_subjects)} subjects...")
+
+    # Extract sample intensity columns (skip annotation columns)
+    sample_cols = [c for c in protein_data.columns if c in sample_metadata]
+
+    # Build the fold-change matrix: subjects x proteins
+    fc_rows = {}
+    for subject in paired_subjects:
+        baseline_sample = baseline.loc[subject, "Sample"]
+        followup_sample = followup.loc[subject, "Sample"]
+
+        if baseline_sample in sample_cols and followup_sample in sample_cols:
+            diff = protein_data[followup_sample].values - protein_data[baseline_sample].values
+            fc_rows[subject] = diff
+
+    fc_matrix = pd.DataFrame(fc_rows, index=protein_data.index).T
+    fc_matrix.index.name = config.subject_column
+
+    print(f"  Result: {fc_matrix.shape[0]} subjects x {fc_matrix.shape[1]} proteins")
+    return fc_matrix
+
+
+def run_mixed_effects_analysis(protein_data, metadata_df, config, protein_annotations=None):
+    """Run mixed-effects model analysis
+
+    Supports multiple analysis types:
+    - linear_trend (or dose_response): Protein ~ Time + (1|Subject) with continuous time
+      Tests if there is a linear trend over time (slope != 0)
+    - longitudinal: Protein ~ C(Time) + (1|Subject) with categorical time
+      Tests if protein changes at all over time (F-test on time factor)
+    - interaction: Protein ~ Group * Time + (1|Subject)
+      Tests if time effect differs between groups
+    """
+
+    if not HAS_STATSMODELS:
+        raise ImportError("statsmodels is required for mixed-effects analysis")
+
+    # Get time column (time_column preferred, dose_column for backward compatibility)
+    time_col = getattr(config, "time_column", None) or getattr(config, "dose_column", None)
+
+    # Determine if this is a longitudinal (categorical time) analysis
+    is_longitudinal = hasattr(config, "analysis_type") and config.analysis_type == "longitudinal"
+    is_linear_trend = hasattr(config, "analysis_type") and config.analysis_type in ("linear_trend", "dose_response")
+
+    # Determine model description for logging
+    all_interaction_terms = config.interaction_terms + config.additional_interactions
+
+    if len(all_interaction_terms) >= 2:
+        term1 = _sanitize_formula_term(all_interaction_terms[0])
+        term2 = _sanitize_formula_term(all_interaction_terms[1])
+        model_desc = f"Protein ~ {term1} * {term2}"
+        if len(all_interaction_terms) > 2:
+            model_desc += " + " + " + ".join(_sanitize_formula_term(t) for t in all_interaction_terms[2:])
+    elif len(all_interaction_terms) == 1:
+        term = _sanitize_formula_term(all_interaction_terms[0])
+        model_desc = f"Protein ~ {term}"
+    elif time_col:
+        time_term = _sanitize_formula_term(time_col)
+        if is_longitudinal:
+            model_desc = f"Protein ~ C({time_term})"  # Categorical time for F-test
+        else:
+            model_desc = f"Protein ~ {time_term}"  # Continuous time for linear trend
+    else:
+        model_desc = "Protein ~ 1"  # Intercept only
+
+    if config.covariates:
+        sanitized_covariates = [_sanitize_formula_term(cov) for cov in config.covariates]
+        model_desc += " + " + " + ".join(sanitized_covariates)
+
+    model_desc += f" + (1|{config.subject_column})"
+
+    print("Running mixed-effects analysis...")
+    if is_longitudinal:
+        print("  Analysis type: LONGITUDINAL (any change over time, F-test)")
+        print("  Tests: Do any timepoints differ from each other?")
+    elif is_linear_trend:
+        print("  Analysis type: LINEAR TREND (continuous time)")
+        print("  Tests: Is there a linear trend over time (slope ≠ 0)?")
+    print(f"  Model: {model_desc}")
+
+    results = []
+    n_proteins = len(protein_data)
+
+    for i, (protein_idx, protein_values) in enumerate(protein_data.iterrows()):
+        if (i + 1) % 100 == 0:
+            print(f"  Processed {i + 1}/{n_proteins} proteins...")
+
+        # Get actual protein name if annotations are provided.
+        # run_comprehensive_statistical_analysis reindexes protein_data by Protein ID
+        # before calling this function, so protein_idx is already the protein name in
+        # that path. Older callers may still pass an integer-indexed DataFrame with a
+        # separate annotations table; keep that lookup working by falling back only
+        # when protein_idx actually resolves in the annotations index.
+        actual_protein_name = protein_idx
+        if (
+            protein_annotations is not None
+            and "Protein" in protein_annotations.columns
+            and protein_idx in protein_annotations.index
+        ):
+            actual_protein_name = protein_annotations.loc[protein_idx, "Protein"]
+
+        # Prepare data for this protein
+        protein_df = pd.DataFrame({"Sample": protein_values.index, "Intensity": protein_values.values})
+
+        # Merge with metadata
+        protein_df = protein_df.merge(metadata_df, on="Sample", how="inner")
+
+        # Remove missing values
+        protein_df = protein_df.dropna(subset=["Intensity"])
+
+        if len(protein_df) < 8:  # Need sufficient data for mixed model
+            results.append(_create_empty_mixed_effects_result(actual_protein_name, "Insufficient data"))
+            continue
+
+        try:
+            # Build formula - supports both interaction models and additive models
+            all_interaction_terms = config.interaction_terms + config.additional_interactions
+
+            formula = None
+
+            if len(all_interaction_terms) >= 2:
+                # Build interaction model (first two terms)
+                term1 = _sanitize_formula_term(all_interaction_terms[0])
+                term2 = _sanitize_formula_term(all_interaction_terms[1])
+                formula = f"Intensity ~ {term1} * {term2}"
+                # Add additional interaction terms as main effects
+                if len(all_interaction_terms) > 2:
+                    additional_terms = " + ".join(_sanitize_formula_term(t) for t in all_interaction_terms[2:])
+                    formula += f" + {additional_terms}"
+
+            elif len(all_interaction_terms) == 1:
+                # Build additive model with single main effect
+                term = _sanitize_formula_term(all_interaction_terms[0])
+                formula = f"Intensity ~ {term}"
+
+            elif time_col:
+                # Build time-based model
+                time_term = _sanitize_formula_term(time_col)
+                if is_longitudinal:
+                    # LONGITUDINAL: Treat time as categorical factor for F-test
+                    formula = f"Intensity ~ C({time_term})"
+                else:
+                    # LINEAR TREND: Treat time as continuous for slope test
+                    formula = f"Intensity ~ {time_term}"
+
+            else:
+                # No main effects specified - need at least one predictor
+                raise ValueError("Need at least one predictor variable (interaction_terms, time_column, or covariates)")
+
+            # Add covariates if specified
+            if config.covariates:
+                sanitized_covariates = [_sanitize_formula_term(cov) for cov in config.covariates]
+                formula += " + " + " + ".join(sanitized_covariates)
+
+            # Fit mixed-effects model
+            if mixedlm is None:
+                raise ImportError("statsmodels required for mixed-effects analysis")
+
+            # Suppress convergence warnings during fitting
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=UserWarning)
+                warnings.filterwarnings("ignore", category=RuntimeWarning)
+                warnings.filterwarnings("ignore", message=".*convergence.*")
+                warnings.filterwarnings("ignore", message=".*singular.*")
+
+                model = mixedlm(formula, protein_df, groups=protein_df[config.subject_column])
+
+                # Try robust BFGS method first (more stable than LBFGS)
+                # Fallback to other methods if needed
+                fitted_model = None
+                for method in ["bfgs", "nm", "powell", "lbfgs"]:
+                    try:
+                        fitted_model = model.fit(method=method, disp=False)  # type: ignore[call-arg]
+                        break
+                    except (ValueError, RuntimeError, np.linalg.LinAlgError):
+                        continue
+
+                if fitted_model is None:
+                    raise RuntimeError("All optimization methods failed")
+
+            # Extract results
+            params = fitted_model.params
+            pvalues = fitted_model.pvalues
+
+            # Initialize all effect variables
+            interaction_coef = np.nan
+            interaction_pvalue = np.nan
+            group_effect = np.nan
+            group_pvalue = np.nan
+            time_effect = np.nan
+            time_pvalue = np.nan
+
+            # Determine primary effect based on model type
+            if len(all_interaction_terms) >= 2:
+                # INTERACTION MODEL: Extract interaction and main effects
+
+                # Find interaction parameters (contain both variable names and ":")
+                interaction_candidates = [
+                    p
+                    for p in params.index
+                    if config.interaction_terms[0] in p and config.interaction_terms[1] in p and ":" in p
+                ]
+
+                if interaction_candidates:
+                    # Use the first (and typically only) interaction term
+                    term_name = interaction_candidates[0]
+                    interaction_coef = params[term_name]
+                    interaction_pvalue = pvalues[term_name]
+
+                # Find group effect parameters
+                group_candidates = [
+                    p for p in params.index if config.interaction_terms[0] in p and ":" not in p and p != "Intercept"
+                ]
+
+                if group_candidates:
+                    term_name = group_candidates[0]
+                    group_effect = params[term_name]
+                    group_pvalue = pvalues[term_name]
+
+                # Find time effect parameters
+                time_candidates = [
+                    p for p in params.index if config.interaction_terms[1] in p and ":" not in p and p != "Intercept"
+                ]
+
+                if time_candidates:
+                    term_name = time_candidates[0]
+                    time_effect = params[term_name]
+                    time_pvalue = pvalues[term_name]
+
+            else:
+                # ADDITIVE MODEL: Extract primary predictor effect
+                primary_predictor = None
+
+                if len(all_interaction_terms) == 1:
+                    primary_predictor = all_interaction_terms[0]
+                elif time_col:
+                    primary_predictor = time_col
+
+                if primary_predictor:
+                    # Find the parameter for the primary predictor
+                    primary_candidates = [
+                        p for p in params.index if primary_predictor in p and ":" not in p and p != "Intercept"
+                    ]
+
+                    if is_longitudinal and len(primary_candidates) > 1:
+                        # LONGITUDINAL: Multiple time coefficients (categorical)
+                        # Use Wald test on all time coefficients together (F-test equivalent)
+                        try:
+                            # Build constraint string for joint Wald test
+                            # Test that ALL time coefficients = 0 simultaneously
+                            constraints = [f"{c} = 0" for c in primary_candidates]
+                            wald_test = fitted_model.wald_test(constraints, scalar=True)
+                            group_pvalue = wald_test.pvalue
+                            # For logFC, use max absolute coefficient as effect size
+                            time_coefficients = [params[c] for c in primary_candidates]
+                            max_abs_idx = np.argmax(np.abs(time_coefficients))
+                            group_effect = time_coefficients[max_abs_idx]
+                        except Exception:
+                            # Fallback: use most significant individual coefficient
+                            min_pval_idx = np.argmin([pvalues[c] for c in primary_candidates])
+                            term_name = primary_candidates[min_pval_idx]
+                            group_effect = params[term_name]
+                            group_pvalue = pvalues[term_name]
+                    elif primary_candidates:
+                        # LINEAR TREND: Single time coefficient (continuous)
+                        term_name = primary_candidates[0]
+                        group_effect = params[term_name]
+                        group_pvalue = pvalues[term_name]
+
+            # Determine primary effect for logFC and P.Value
+            # For interaction models: use interaction term
+            # For additive models: use primary predictor (group_effect)
+            if len(all_interaction_terms) >= 2:
+                primary_logfc = interaction_coef
+                primary_pvalue = interaction_pvalue
+            else:
+                primary_logfc = group_effect
+                primary_pvalue = group_pvalue
+
+            # Determine test method description
+            if is_longitudinal:
+                test_method = "Mixed-effects model (Wald F-test on time)"
+            elif is_linear_trend:
+                test_method = "Mixed-effects model (linear trend)"
+            else:
+                test_method = "Mixed-effects model"
+
+            result = {
+                "Protein": actual_protein_name,  # Use actual protein name
+                "logFC": primary_logfc,  # Primary effect (interaction or main effect)
+                "AveExpr": protein_df["Intensity"].mean(),
+                "t": np.nan,  # Not applicable for mixed model
+                "P.Value": primary_pvalue,  # Primary p-value
+                "B": np.nan,  # Not applicable
+                "group_effect": group_effect,
+                "group_pvalue": group_pvalue,
+                "time_effect": time_effect,
+                "time_pvalue": time_pvalue,
+                "interaction_effect": interaction_coef,
+                "interaction_pvalue": interaction_pvalue,
+                "aic": fitted_model.aic if fitted_model else np.nan,
+                "bic": fitted_model.bic if fitted_model else np.nan,
+                "n_obs": len(protein_df),
+                "test_method": test_method,
+            }
+
+            results.append(result)
+
+        except (ValueError, RuntimeError, np.linalg.LinAlgError) as e:
+            error_message = f"Model failed: {e}"
+            if i < 3:  # Show details for first few failures
+                print(f"  Protein {i + 1} failed: {error_message}")
+            results.append(_create_empty_mixed_effects_result(actual_protein_name, error_message))
+
+    print(f"Done: Mixed-effects analysis completed for {len(results)} proteins")
+    return pd.DataFrame(results)
+
+
+def run_unpaired_t_test(protein_data, metadata_df, config):
+    """Run unpaired t-test analysis"""
+
+    print("Running unpaired t-test analysis...")
+
+    results = []
+    n_proteins = len(protein_data)
+
+    # Filter to specific timepoint if needed
+    if config.paired_column and config.paired_label2:
+        metadata_df = metadata_df[metadata_df[config.paired_column] == config.paired_label2]
+        print(f"  Analyzing {config.paired_label2} timepoint only")
+
+    for i, (protein_idx, protein_values) in enumerate(protein_data.iterrows()):
+        if (i + 1) % 200 == 0:
+            print(f"  Processed {i + 1}/{n_proteins} proteins...")
+
+        # Get data for this protein
+        protein_df = pd.DataFrame({"Sample": protein_values.index, "Intensity": protein_values.values})
+
+        # Merge with metadata
+        protein_df = protein_df.merge(metadata_df, on="Sample", how="inner")
+        protein_df = protein_df.dropna(subset=["Intensity"])
+
+        if len(protein_df) < 4:
+            results.append(_create_empty_result(protein_idx, "Insufficient data"))
+            continue
+
+        # Split into groups
+        group1_data = protein_df[protein_df[config.group_column] == config.group_labels[0]]["Intensity"]
+        group2_data = protein_df[protein_df[config.group_column] == config.group_labels[1]]["Intensity"]
+
+        if len(group1_data) < 2 or len(group2_data) < 2:
+            results.append(_create_empty_result(protein_idx, "Insufficient group data"))
+            continue
+
+        try:
+            # Use Student's t-test (equal variance) or Welch's t-test based on config
+            equal_var = getattr(config, "assume_equal_variance", False)
+            t_stat, p_value = ttest_ind(group2_data, group1_data, equal_var=equal_var)
+            test_name = "Student's t-test" if equal_var else "Welch's t-test"
+
+            # Calculate effect size
+            pooled_std = np.sqrt(
+                ((len(group1_data) - 1) * group1_data.var() + (len(group2_data) - 1) * group2_data.var())
+                / (len(group1_data) + len(group2_data) - 2)
+            )
+            cohens_d = (group2_data.mean() - group1_data.mean()) / pooled_std if pooled_std > 0 else 0
+
+            # Log fold change
+            log_fc = group2_data.mean() - group1_data.mean()
+
+            result = {
+                "Protein": protein_idx,
+                "logFC": log_fc,
+                "AveExpr": protein_df["Intensity"].mean(),
+                "t": t_stat,
+                "P.Value": p_value,
+                "B": np.nan,
+                "n_group1": len(group1_data),
+                "n_group2": len(group2_data),
+                "cohens_d": cohens_d,
+                "test_method": test_name,
+            }
+
+            results.append(result)
+
+        except (ValueError, RuntimeError, ZeroDivisionError) as e:
+            results.append(_create_empty_result(protein_idx, f"Analysis failed: {e}"))
+
+    print(f"Done: Unpaired t-test completed for {len(results)} proteins")
+    return pd.DataFrame(results)
+
+
+def run_wilcoxon_test(protein_data, metadata_df, config):
+    """Run paired non-parametric Wilcoxon signed-rank test"""
+
+    print("Running Wilcoxon signed-rank test analysis...")
+
+    results = []
+    n_proteins = len(protein_data)
+
+    for i, (protein_idx, protein_values) in enumerate(protein_data.iterrows()):
+        if (i + 1) % 200 == 0:
+            print(f"  Processed {i + 1}/{n_proteins} proteins...")
+
+        # Get data for this protein
+        protein_df = pd.DataFrame({"Sample": protein_values.index, "Intensity": protein_values.values})
+
+        # Merge with metadata
+        protein_df = protein_df.merge(metadata_df, on="Sample", how="inner")
+
+        # Remove missing values
+        protein_df = protein_df.dropna(subset=["Intensity"])
+
+        if len(protein_df) < 4:  # Need at least some data
+            results.append(_create_empty_result(protein_idx, "Insufficient data"))
+            continue
+
+        # Calculate paired differences for each subject
+        baseline_data = protein_df[protein_df[config.paired_column] == config.paired_label1]
+        followup_data = protein_df[protein_df[config.paired_column] == config.paired_label2]
+
+        # Merge on subject to get paired data
+        paired_data = baseline_data.merge(followup_data, on=config.subject_column, suffixes=("_baseline", "_followup"))
+
+        if len(paired_data) < 3:  # Need at least 3 pairs
+            results.append(_create_empty_result(protein_idx, "Insufficient paired data"))
+            continue
+
+        # Calculate differences (followup - baseline)
+        differences = paired_data["Intensity_followup"] - paired_data["Intensity_baseline"]
+
+        # Remove zero differences for Wilcoxon test
+        non_zero_diffs = differences[differences != 0]
+
+        if len(non_zero_diffs) < 3:
+            results.append(_create_empty_result(protein_idx, "Insufficient non-zero differences"))
+            continue
+
+        try:
+            # Wilcoxon signed-rank test
+            statistic, p_value = wilcoxon(non_zero_diffs, alternative="two-sided")
+
+            # Calculate effect size (r = z / sqrt(N))
+            # For Wilcoxon, we use median and IQR
+            mean_diff = differences.mean()
+            median_diff = differences.median()
+
+            # Pseudo-Cohen's d using median and MAD (more robust)
+            mad = np.median(np.abs(differences - median_diff)) * 1.4826  # Scale factor for normality
+            effect_size = median_diff / mad if mad > 0 else 0
+
+            result = {
+                "Protein": protein_idx,
+                "logFC": median_diff,  # Use median for non-parametric
+                "AveExpr": protein_df["Intensity"].mean(),
+                "statistic": statistic,
+                "P.Value": p_value,
+                "B": np.nan,  # Not applicable for non-parametric tests
+                "n_pairs": len(paired_data),
+                "mean_diff": mean_diff,
+                "median_diff": median_diff,
+                "Effect_Size": effect_size,
+                "test_method": "Wilcoxon signed-rank",
+            }
+
+            results.append(result)
+
+        except (ValueError, RuntimeError, ZeroDivisionError) as e:
+            results.append(_create_empty_result(protein_idx, f"Analysis failed: {e}"))
+
+    print(f"Done: Wilcoxon signed-rank test completed for {len(results)} proteins")
+    return pd.DataFrame(results)
+
+
+def run_mann_whitney_test(protein_data, metadata_df, config):
+    """Run unpaired non-parametric Mann-Whitney U test"""
+
+    print("Running Mann-Whitney U test analysis...")
+
+    results = []
+    n_proteins = len(protein_data)
+
+    # Filter to specific timepoint if needed (only if paired_column is present in metadata)
+    if (
+        config.paired_column
+        and config.paired_label2
+        and hasattr(config, "paired_column")
+        and config.paired_column in metadata_df.columns
+    ):
+        metadata_df = metadata_df[metadata_df[config.paired_column] == config.paired_label2]
+        print(f"  Analyzing {config.paired_label2} timepoint only")
+
+    for i, (protein_idx, protein_values) in enumerate(protein_data.iterrows()):
+        if (i + 1) % 200 == 0:
+            print(f"  Processed {i + 1}/{n_proteins} proteins...")
+
+        # Get data for this protein
+        protein_df = pd.DataFrame({"Sample": protein_values.index, "Intensity": protein_values.values})
+
+        # Merge with metadata
+        protein_df = protein_df.merge(metadata_df, on="Sample", how="inner")
+        protein_df = protein_df.dropna(subset=["Intensity"])
+
+        if len(protein_df) < 4:
+            results.append(_create_empty_result(protein_idx, "Insufficient data"))
+            continue
+
+        # Split into groups
+        group1_data = protein_df[protein_df[config.group_column] == config.group_labels[0]]["Intensity"]
+        group2_data = protein_df[protein_df[config.group_column] == config.group_labels[1]]["Intensity"]
+
+        if len(group1_data) < 2 or len(group2_data) < 2:
+            results.append(_create_empty_result(protein_idx, "Insufficient group data"))
+            continue
+
+        try:
+            # Mann-Whitney U test
+            # Convert to float arrays to ensure scipy compatibility
+            group1_arr = np.asarray(group1_data, dtype=float)
+            group2_arr = np.asarray(group2_data, dtype=float)
+            statistic, p_value = mannwhitneyu(group2_arr, group1_arr, alternative="two-sided")
+
+            # Calculate effect size (r = z / sqrt(N))
+            # For Mann-Whitney, we use median and IQR-based effect size
+            median1 = group1_data.median()
+            median2 = group2_data.median()
+
+            # Pooled MAD for effect size
+            mad1 = np.median(np.abs(group1_data - median1)) * 1.4826
+            mad2 = np.median(np.abs(group2_data - median2)) * 1.4826
+            pooled_mad = np.sqrt((mad1**2 + mad2**2) / 2)
+
+            effect_size = (median2 - median1) / pooled_mad if pooled_mad > 0 else 0
+
+            # Log fold change using medians
+            log_fc = median2 - median1
+
+            result = {
+                "Protein": protein_idx,
+                "logFC": log_fc,
+                "AveExpr": protein_df["Intensity"].mean(),
+                "statistic": statistic,
+                "P.Value": p_value,
+                "B": np.nan,
+                "n_group1": len(group1_data),
+                "n_group2": len(group2_data),
+                "Effect_Size": effect_size,
+                "test_method": "Mann-Whitney U",
+            }
+
+            results.append(result)
+
+        except (ValueError, RuntimeError, ZeroDivisionError) as e:
+            results.append(_create_empty_result(protein_idx, f"Analysis failed: {e}"))
+
+    print(f"Done: Mann-Whitney U test completed for {len(results)} proteins")
+    return pd.DataFrame(results)
+
+
+# ---------------------------------------------------------------------------
+# limma / DEqMS-style moderated t-statistics
+#
+# Native NumPy/SciPy implementation of empirical Bayes variance shrinkage,
+# following Smyth (2004) for limma and Zhu et al. (2020) for DEqMS. These
+# are reimplementations with the same statistical intent as the R packages,
+# not bit-for-bit ports - hence the ``_like`` suffix on the public names.
+# ---------------------------------------------------------------------------
+
+
+def _trigamma_inverse(x, max_iter=50, tol=1e-8):
+    """Inverse of the trigamma function ψ'(·) for x > 0.
+
+    Used in limma to recover the prior degrees of freedom d0 from the
+    excess variance of log(s^2) across features. Uses Newton-Raphson
+    with a stable starting guess (Smyth 2004 eq. 5).
+    """
+    from scipy.special import polygamma
+
+    x = float(x)
+    if not np.isfinite(x) or x <= 0:
+        return np.inf
+    # Starting value - from Smyth's limma source
+    if x > 1e7:
+        y = 1.0 / np.sqrt(x)
+    else:
+        y = 0.5 + 1.0 / x
+    for _ in range(max_iter):
+        tri = polygamma(1, y)
+        tetra = polygamma(2, y)
+        delta = tri * (1 - tri / x) / tetra
+        y = y + delta
+        if np.abs(delta / y) < tol:
+            break
+    return y
+
+
+# Test/diagnostic seam: set False to force the per-feature OLS loop even on a
+# fully-observed matrix (used by the regression test that asserts the vectorised
+# fast path matches the loop bit-for-bit). Do not toggle in production.
+_FAST_DENSE_OLS = True
+
+
+def _fit_moderated_t(feature_data, metadata_df, config):
+    """Fit per-feature linear model and compute moderated t-statistics.
+
+    This is the shared workhorse behind :func:`run_moderated_linear_model`.
+    It handles the design-matrix construction,
+    per-feature OLS fit, and the empirical Bayes shrinkage of residual
+    variances toward a global prior (s0^2, d0). DEqMS replaces the single
+    prior with a peptide-count-conditioned prior after this function
+    returns.
+
+    Parameters
+    ----------
+    feature_data : pd.DataFrame
+        Protein- or peptide-level intensity matrix (rows = features,
+        columns = sample names). The row index is used as the feature
+        identifier in the returned DataFrame.
+    metadata_df : pd.DataFrame
+        Sample metadata with a ``Sample`` column whose values match
+        ``feature_data`` columns, plus the group/subject/paired columns
+        referenced by ``config``.
+    config : StatisticalConfig
+        Needs ``analysis_type``, ``group_column``, ``group_labels`` (for
+        unpaired), ``subject_column`` + ``paired_column`` +
+        ``paired_label1``/``paired_label2`` (for paired).
+
+    Returns
+    -------
+    dict with keys:
+        ``features`` - list of feature IDs (row indices) in fit order
+        ``beta``    - array of contrast estimates (logFC) per feature
+        ``s2``      - array of residual variances per feature
+        ``df``      - array of residual degrees of freedom per feature
+        ``v_c``     - array of contrast variances (one per feature; varies
+                      because of missing-value patterns)
+        ``ave_expr``- array of mean expression per feature
+        ``n_samples_used`` - array of sample counts per feature
+        ``s0_sq``   - global prior variance (scalar)
+        ``d0``      - global prior degrees of freedom (scalar)
+    """
+    analysis_type = config.analysis_type
+    if analysis_type not in ("unpaired", "paired", "linear_trend"):
+        raise ValueError(
+            f"moderated_linear_model currently supports analysis_type in "
+            f"('unpaired', 'paired', 'linear_trend'); got {analysis_type!r}."
+        )
+
+    # Identify samples that are in both the feature matrix and the metadata
+    sample_cols = [c for c in feature_data.columns if c in set(metadata_df["Sample"])]
+    if len(sample_cols) < 4:
+        raise ValueError(
+            f"Need at least 4 samples present in both feature_data and metadata_df; found {len(sample_cols)}."
+        )
+
+    # Order metadata to match feature_data column order
+    meta = metadata_df.set_index("Sample").loc[sample_cols].copy()
+
+    # Build design matrix and contrast vector
+    group_col = config.group_column
+    group_labels = config.group_labels
+
+    if analysis_type == "unpaired":
+        if not group_col or len(group_labels or []) < 2:
+            raise ValueError("unpaired moderated_linear_model requires group_column and two group_labels")
+        # Restrict to the two requested groups
+        keep = meta[group_col].isin(group_labels[:2])
+        meta = meta.loc[keep]
+        sample_cols = meta.index.tolist()
+        if len(sample_cols) < 4:
+            raise ValueError(f"After restricting to groups {group_labels[:2]}, only {len(sample_cols)} samples remain.")
+        # Design: intercept + treatment indicator (1 if group == group_labels[1])
+        treat = (meta[group_col].astype(str) == str(group_labels[1])).astype(float).values
+        X = np.column_stack([np.ones_like(treat), treat])
+        contrast = np.array([0.0, 1.0])
+
+    elif analysis_type == "paired":
+        subj_col = config.subject_column
+        paired_col = config.paired_column
+        if not subj_col or not paired_col or config.paired_label1 is None or config.paired_label2 is None:
+            raise ValueError(
+                "paired moderated_linear_model requires subject_column, paired_column, paired_label1, and paired_label2"
+            )
+        keep = meta[paired_col].astype(str).isin([str(config.paired_label1), str(config.paired_label2)])
+        meta = meta.loc[keep]
+        sample_cols = meta.index.tolist()
+        if len(sample_cols) < 4:
+            raise ValueError(f"After restricting to paired labels, only {len(sample_cols)} samples remain.")
+        # Design: treatment indicator + subject factors (block)
+        treat = (meta[paired_col].astype(str) == str(config.paired_label2)).astype(float).values
+        subjects = meta[subj_col].astype(str).values
+        unique_subjects = sorted(set(subjects))
+        # One-hot subject factor with first subject as the reference -> intercept absorbs it
+        subj_mat = np.zeros((len(subjects), len(unique_subjects) - 1))
+        for j, s in enumerate(unique_subjects[1:]):
+            subj_mat[:, j] = (subjects == s).astype(float)
+        X = np.column_stack([np.ones_like(treat), treat, subj_mat])
+        contrast = np.zeros(X.shape[1])
+        contrast[1] = 1.0
+
+    else:  # linear_trend
+        time_col = config.time_column or config.dose_column
+        if not time_col:
+            raise ValueError(
+                "linear_trend moderated_linear_model requires config.time_column (or legacy config.dose_column)"
+            )
+        if time_col not in meta.columns:
+            raise ValueError(f"time_column {time_col!r} not present in metadata columns")
+        # Coerce to numeric; refuse if any sample has a missing/non-numeric time value.
+        try:
+            time_vec = pd.to_numeric(meta[time_col], errors="raise").to_numpy(dtype=float)
+        except (ValueError, TypeError) as e:
+            raise ValueError(
+                f"linear_trend requires numeric values in time_column {time_col!r}; failed to coerce: {e}"
+            ) from e
+        if not np.all(np.isfinite(time_vec)):
+            raise ValueError(
+                f"linear_trend requires every sample to have a finite numeric {time_col!r} value; found NaN/inf"
+            )
+        if len(np.unique(time_vec)) < 2:
+            raise ValueError(
+                f"linear_trend requires at least 2 unique values in {time_col!r}; found {len(np.unique(time_vec))}"
+            )
+        # Optional subject one-hot block for repeated-measures designs.
+        subj_col = config.subject_column
+        if subj_col and subj_col in meta.columns:
+            subjects = meta[subj_col].astype(str).values
+            unique_subjects = sorted(set(subjects))
+            # k - 1 columns; first subject absorbed into the intercept.
+            subj_mat = np.zeros((len(subjects), max(len(unique_subjects) - 1, 0)))
+            for j, s in enumerate(unique_subjects[1:]):
+                subj_mat[:, j] = (subjects == s).astype(float)
+            X = np.column_stack([np.ones_like(time_vec), time_vec, subj_mat])
+        else:
+            X = np.column_stack([np.ones_like(time_vec), time_vec])
+        # Need enough samples to fit the design plus leave residual df > 0.
+        if X.shape[0] < X.shape[1] + 2:
+            raise ValueError(
+                f"linear_trend needs at least {X.shape[1] + 2} samples for the "
+                f"design [{X.shape[1]} cols] + residual df; got {X.shape[0]}."
+            )
+        contrast = np.zeros(X.shape[1])
+        contrast[1] = 1.0  # test the slope coefficient
+
+    # Subset feature_data to the design-matrix samples
+    Y_all = feature_data[sample_cols]
+    features = list(Y_all.index)
+
+    # Per-feature OLS loop (stays robust to NaN patterns)
+    n_features = len(features)
+    beta_out = np.full(n_features, np.nan)
+    s2_out = np.full(n_features, np.nan)
+    df_out = np.full(n_features, np.nan)
+    vc_out = np.full(n_features, np.nan)
+    ave_out = np.full(n_features, np.nan)
+    nsamp_out = np.full(n_features, 0, dtype=int)
+
+    # Fast path: when the matrix is fully observed, the design X (and hence
+    # XtX_inv, the projection and the contrast variance) is identical for every
+    # feature, so the whole set is one batched BLAS solve instead of a Python
+    # loop with a per-feature pandas pull + np.linalg.inv. Algebraically
+    # identical to the loop below (agreement ~1e-10 from float reassociation);
+    # any missing value falls through to the exact per-feature loop.
+    p = X.shape[1]
+    n_obs = X.shape[0]
+    Y = Y_all.to_numpy(dtype=float)
+    fast_done = False
+    if _FAST_DENSE_OLS and n_features and n_obs - p > 0 and np.isfinite(Y).all():
+        try:
+            XtX_inv = np.linalg.inv(X.T @ X)
+        except np.linalg.LinAlgError:
+            XtX_inv = None
+        if XtX_inv is not None:
+            proj = XtX_inv @ X.T                    # (p, n_obs)
+            betas = Y @ proj.T                      # (n_features, p)
+            resid = Y - betas @ X.T                 # (n_features, n_obs)
+            d = n_obs - p
+            beta_out[:] = betas @ contrast
+            s2_out[:] = np.einsum("ij,ij->i", resid, resid) / d
+            df_out[:] = d
+            vc_out[:] = float(contrast @ XtX_inv @ contrast)
+            ave_out[:] = Y.mean(axis=1)
+            nsamp_out[:] = n_obs
+            fast_done = True
+
+    if not fast_done:
+        for i, feat in enumerate(features):
+            y = Y_all.loc[feat].to_numpy(dtype=float)
+            mask = np.isfinite(y)
+            if mask.sum() <= X.shape[1]:
+                continue
+            y_i = y[mask]
+            X_i = X[mask, :]
+            try:
+                XtX = X_i.T @ X_i
+                XtX_inv = np.linalg.inv(XtX)
+            except np.linalg.LinAlgError:
+                continue
+            beta = XtX_inv @ X_i.T @ y_i
+            resid = y_i - X_i @ beta
+            d_i = len(y_i) - X.shape[1]
+            if d_i <= 0:
+                continue
+            s2_i = float(resid @ resid / d_i)
+            v_c_i = float(contrast @ XtX_inv @ contrast)
+            beta_out[i] = float(contrast @ beta)
+            s2_out[i] = s2_i
+            df_out[i] = d_i
+            vc_out[i] = v_c_i
+            ave_out[i] = float(np.nanmean(y_i))
+            nsamp_out[i] = len(y_i)
+
+    # Empirical Bayes prior (Smyth 2004)
+    valid = np.isfinite(s2_out) & (s2_out > 0) & (df_out > 0)
+    if valid.sum() < 2:
+        raise ValueError("Not enough features with valid residual variances to fit empirical Bayes prior.")
+
+    robust = bool(getattr(config, "robust", False))
+    s0_sq, d0 = _fit_limma_prior(s2_out[valid], df_out[valid], robust=robust)
+
+    return {
+        "features": features,
+        "beta": beta_out,
+        "s2": s2_out,
+        "df": df_out,
+        "v_c": vc_out,
+        "ave_expr": ave_out,
+        "n_samples_used": nsamp_out,
+        "s0_sq": s0_sq,
+        "d0": d0,
+    }
+
+
+def _fit_limma_prior(s2_valid, d_valid, robust=False, winsor_sigma=4.0):
+    """Fit Smyth's (s0^2, d0) hyperparameters from residual variances.
+
+    Implements Smyth (2004) method-of-moments on ``log(s^2)``. When
+    ``robust=True``, Winsorizes the centred z-statistic at ``±winsor_sigma``
+    standard deviations before the moment fit so a handful of extreme
+    features don't inflate the prior. Matches the intent (but not the
+    precise Fisher-scoring algorithm) of limma's ``robust=TRUE``.
+
+    Returns a ``(s0_sq, d0)`` tuple. Returns ``(mean(s^2), inf)`` when no
+    excess variance is detected.
+    """
+    from scipy.special import polygamma
+
+    log_s2 = np.log(s2_valid)
+    d = np.asarray(d_valid, dtype=float)
+    z = log_s2 - polygamma(0, d / 2.0) + np.log(d / 2.0)
+    z_mean = float(np.mean(z))
+    e_var = float(np.var(z, ddof=1) - np.mean(polygamma(1, d / 2.0)))
+
+    if robust:
+        # Use median/MAD (not mean/sd) to set the Winsorization threshold,
+        # so a handful of outliers can't widen the window that's supposed
+        # to exclude them. 1.4826 converts MAD into a sigma-equivalent for
+        # a normal distribution.
+        z_median = float(np.median(z))
+        mad = float(np.median(np.abs(z - z_median)))
+        if mad > 0:
+            threshold = winsor_sigma * 1.4826 * mad
+            z_wins = np.clip(z, z_median - threshold, z_median + threshold)
+            z_mean = float(np.mean(z_wins))
+            e_var = float(np.var(z_wins, ddof=1) - np.mean(polygamma(1, d / 2.0)))
+
+    if not np.isfinite(e_var) or e_var <= 0:
+        return float(np.mean(s2_valid)), float(np.inf)
+
+    d0_half = _trigamma_inverse(e_var)
+    d0 = 2.0 * d0_half
+    s0_sq = float(np.exp(z_mean + polygamma(0, d0_half) - np.log(d0_half)))
+    return s0_sq, d0
+
+
+def _moderated_results_df(fit, s0_sq_per_feature, d0, config):
+    """Convert a ``_fit_moderated_t`` result + per-feature prior into a
+    DataFrame in the project's standard schema."""
+    from scipy.stats import t as student_t
+
+    features = fit["features"]
+    beta = fit["beta"]
+    s2 = fit["s2"]
+    df_resid = fit["df"]
+    v_c = fit["v_c"]
+    ave_expr = fit["ave_expr"]
+    n_samples = fit["n_samples_used"]
+
+    d0_arr = np.broadcast_to(d0, np.shape(s0_sq_per_feature)).astype(float)
+
+    # Posterior variance s~^2 = (d0 s0^2 + d s^2) / (d0 + d)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        s2_post = np.where(
+            np.isfinite(d0_arr),
+            (d0_arr * s0_sq_per_feature + df_resid * s2) / (d0_arr + df_resid),
+            s0_sq_per_feature,  # limit d0 -> inf
+        )
+        df_post = np.where(np.isfinite(d0_arr), df_resid + d0_arr, np.inf)
+        se = np.sqrt(s2_post * v_c)
+        t_mod = beta / se
+        # Two-sided p-value
+        p_mod = np.where(
+            np.isfinite(t_mod),
+            2.0 * student_t.sf(np.abs(t_mod), df=df_post),
+            np.nan,
+        )
+
+    # In unpaired analysis we can report per-group counts for transparency;
+    # for the paired case this is redundant (each subject has both) so we
+    # split naively by contrast sign.
+    n_group1 = np.where(beta < 0, n_samples, n_samples // 2)
+    n_group2 = n_samples - n_group1
+
+    moderation = getattr(config, "moderation", "limma")
+    method_label = f"moderated_linear_model[{moderation}]"
+
+    # Global limma prior variance (broadcast for column storage). For
+    # ``deqms_like``, ``s0_sq_per_feature`` is the peptide-count-dependent
+    # prior and this column is the constant-across-proteins limma prior
+    # that deqms_like would have used without peptide counts.
+    limma_s0_sq_col = np.full(len(features), np.nan)
+    try:
+        # s0_sq from the limma fit is exposed via _fit_moderated_t but we
+        # don't have it here; _moderated_results_df receives the per-feature
+        # prior in ``s0_sq_per_feature``. For limma_like the per-feature
+        # array is constant, so take any finite value.
+        if np.ndim(s0_sq_per_feature) == 0 or len(np.unique(s0_sq_per_feature)) == 1:
+            limma_s0_sq_col[:] = float(np.asarray(s0_sq_per_feature).ravel()[0])
+    except (TypeError, ValueError):
+        pass
+
+    result = pd.DataFrame(
+        {
+            "Protein": features,
+            "logFC": beta,
+            "AveExpr": ave_expr,
+            "t": t_mod,
+            "P.Value": p_mod,
+            "B": np.nan,
+            "n_group1": n_group1,
+            "n_group2": n_group2,
+            "residual_s2": s2,
+            "residual_df": df_resid,
+            "posterior_s2": s2_post,
+            "posterior_df": df_post,
+            "limma_s0_sq": limma_s0_sq_col,
+            "test_method": method_label,
+        }
+    )
+    return result
+
+
+def _fit_count_dependent_prior(fit, counts):
+    """LOWESS prior on log(s^2) vs log(peptide count).
+
+    Used by the ``deqms`` moderation mode. Returns a per-feature array
+    of prior variances aligned to ``fit["features"]``, plus the aligned
+    count array for diagnostics.
+    """
+    from statsmodels.nonparametric.smoothers_lowess import lowess
+
+    s2 = fit["s2"]
+    counts = np.asarray(counts, dtype=float)
+    valid = np.isfinite(s2) & (s2 > 0) & np.isfinite(counts) & (counts >= 1)
+    if valid.sum() < 5:
+        raise ValueError(
+            "deqms moderation needs at least 5 features with positive peptide counts "
+            "and finite residual variance to fit the count-dependent variance prior."
+        )
+
+    log_counts_valid = np.log(counts[valid])
+    log_s2_valid = np.log(s2[valid])
+    smoothed = lowess(log_s2_valid, log_counts_valid, frac=0.5, it=3, return_sorted=True)
+    xs, ys = smoothed[:, 0], smoothed[:, 1]
+
+    with np.errstate(invalid="ignore"):
+        all_log_counts = np.log(np.where(counts >= 1, counts, np.nan))
+    per_feature_log_s0 = np.interp(all_log_counts, xs, ys, left=ys[0], right=ys[-1])
+    global_log_s0 = float(np.mean(log_s2_valid))
+    per_feature_log_s0 = np.where(np.isfinite(per_feature_log_s0), per_feature_log_s0, global_log_s0)
+    return np.exp(per_feature_log_s0), counts
+
+
+def _per_feature_group_stats(feature_data, metadata_df, config):
+    """Compute per-(feature, group) mean intensity and SD (raw-scale).
+
+    Returns a dict with parallel arrays keyed by feature index:
+      - ``feature_idx``: position of the feature in ``feature_data.index``
+      - ``feature_id``: the feature identifier
+      - ``group``: group label
+      - ``n_samples``: number of non-missing samples in this group
+      - ``mean_intensity``: arithmetic mean across samples in this group
+      - ``sd_intensity``: standard deviation (ddof=1) across samples in this group
+
+    Operates on raw (pre-log) intensities so that the Poisson mean-variance
+    relationship is expressed in its natural units. The caller is
+    responsible for ensuring ``feature_data`` contains raw intensities
+    (the dispatcher preserves this separately from the log-transformed
+    view passed to the moderated-t fit).
+    """
+    analysis_type = config.analysis_type
+    if analysis_type not in ("unpaired", "paired", "linear_trend"):
+        raise ValueError(
+            "intensity_trend moderation requires analysis_type in "
+            f"('unpaired', 'paired', 'linear_trend'); got {analysis_type!r}."
+        )
+
+    sample_cols = [c for c in feature_data.columns if c in set(metadata_df["Sample"])]
+    meta = metadata_df.set_index("Sample").loc[sample_cols].copy()
+
+    if analysis_type == "unpaired":
+        group_col = config.group_column
+        labels = list(config.group_labels[:2])
+        keep = meta[group_col].astype(str).isin([str(g) for g in labels])
+        meta = meta.loc[keep]
+        sample_cols = meta.index.tolist()
+        group_labels_by_sample = meta[group_col].astype(str).tolist()
+    elif analysis_type == "paired":
+        paired_col = config.paired_column
+        labels = [str(config.paired_label1), str(config.paired_label2)]
+        keep = meta[paired_col].astype(str).isin(labels)
+        meta = meta.loc[keep]
+        sample_cols = meta.index.tolist()
+        group_labels_by_sample = meta[paired_col].astype(str).tolist()
+    else:  # linear_trend: one "group" per unique time value
+        time_col = config.time_column or config.dose_column
+        # Validation was already done by `_fit_moderated_t`; defensive check here too.
+        if not time_col or time_col not in meta.columns:
+            raise ValueError(
+                "linear_trend intensity_trend prior requires a time_column "
+                "(or legacy dose_column) present in the metadata."
+            )
+        group_labels_by_sample = meta[time_col].astype(str).tolist()
+
+    feature_ids = list(feature_data.index)
+    rows = []
+    for g_label in sorted(set(group_labels_by_sample)):
+        cols_g = [c for c, gl in zip(sample_cols, group_labels_by_sample) if gl == g_label]
+        if len(cols_g) < 2:
+            continue
+        sub = feature_data[cols_g].to_numpy(dtype=float)
+        means = np.nanmean(sub, axis=1)
+        sds = np.nanstd(sub, axis=1, ddof=1)
+        n_eff = np.sum(~np.isnan(sub), axis=1)
+        for i, fid in enumerate(feature_ids):
+            rows.append(
+                {
+                    "feature_idx": i,
+                    "feature_id": fid,
+                    "group": g_label,
+                    "n_samples": int(n_eff[i]),
+                    "mean_intensity": float(means[i]) if np.isfinite(means[i]) else np.nan,
+                    "sd_intensity": float(sds[i]) if np.isfinite(sds[i]) else np.nan,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _fit_intensity_trend_prior(fit, raw_feature_data, metadata_df, config):
+    """LOWESS prior on log(variance) vs log(mean intensity), per (feature, group).
+
+    This is the Python equivalent of limma's ``trend=TRUE``. Each
+    (feature, group) pair contributes one point to the LOWESS fit:
+    Y = log(within-group variance on raw intensities),
+    X = log(within-group mean intensity).
+
+    Returns a tuple ``(s0_sq_per_feature, fg_points)`` where:
+      - ``s0_sq_per_feature`` is a per-feature prior variance **in the
+        log-intensity space used by the moderated-t fit**. The LOWESS
+        gives us a variance in raw-intensity space; we convert to
+        log-space via the delta-method approximation
+        ``var_log = var_raw / mean_raw^2``, then combine across groups
+        as a sample-size-weighted mean per feature.
+      - ``fg_points`` is the long-form DataFrame produced by
+        :func:`_per_feature_group_stats`, enriched with the per-point
+        LOWESS predictions for plotting.
+    """
+    from statsmodels.nonparametric.smoothers_lowess import lowess
+
+    fg = _per_feature_group_stats(raw_feature_data, metadata_df, config)
+    mask = (
+        np.isfinite(fg["mean_intensity"].to_numpy())
+        & np.isfinite(fg["sd_intensity"].to_numpy())
+        & (fg["mean_intensity"].to_numpy() > 0)
+        & (fg["sd_intensity"].to_numpy() > 0)
+        & (fg["n_samples"].to_numpy() >= 2)
+    )
+    if mask.sum() < 5:
+        raise ValueError(
+            "intensity_trend moderation needs at least 5 (feature, group) points "
+            "with positive finite mean and SD to fit the trend."
+        )
+
+    fg_valid = fg[mask].copy()
+    log_mean = np.log(fg_valid["mean_intensity"].to_numpy())
+    log_var_raw = 2.0 * np.log(fg_valid["sd_intensity"].to_numpy())
+    smoothed = lowess(log_var_raw, log_mean, frac=0.5, it=3, return_sorted=True)
+    xs, ys = smoothed[:, 0], smoothed[:, 1]
+
+    # Per (feature, group) predicted log(raw variance) from the LOWESS.
+    all_log_mean = np.log(fg["mean_intensity"].to_numpy(dtype=float))
+    log_var_hat = np.interp(all_log_mean, xs, ys, left=ys[0], right=ys[-1])
+    fg["predicted_sd"] = np.exp(0.5 * log_var_hat)
+    fg["predicted_variance_raw"] = np.exp(log_var_hat)
+
+    # Convert the raw-space predicted variance into the log-space variance
+    # used by the moderated-t machinery:
+    #   var_log_x ≈ var_raw_x / mean_raw_x^2   (delta method for x -> log x,
+    # or more precisely log base e; if the upstream log-transform used
+    # log2, divide again by (ln 2)^2.)
+    # Upstream `_fit_moderated_t` operates on whatever log base was chosen
+    # in `_apply_log_transformation_if_needed`. We convert to the same base
+    # by dividing by (ln base)^2.
+    log_base = str(getattr(config, "log_base", "log2")).lower()
+    base_factor = {"log2": np.log(2.0) ** 2, "log10": np.log(10.0) ** 2, "ln": 1.0}.get(log_base, np.log(2.0) ** 2)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        predicted_var_logspace = (
+            fg["predicted_variance_raw"].to_numpy() / (fg["mean_intensity"].to_numpy() ** 2) / base_factor
+        )
+    fg["predicted_variance_logspace"] = predicted_var_logspace
+
+    # Combine across groups for each feature: sample-size-weighted mean
+    # of the per-group predicted log-space variance.
+    n_features = len(fit["features"])
+    s0_sq = np.full(n_features, np.nan)
+    for feat_idx, grp in fg.groupby("feature_idx", sort=False):
+        finite = np.isfinite(grp["predicted_variance_logspace"].to_numpy()) & (grp["n_samples"].to_numpy() > 0)
+        if finite.sum() == 0:
+            continue
+        w = grp["n_samples"].to_numpy()[finite].astype(float)
+        v = grp["predicted_variance_logspace"].to_numpy()[finite]
+        s0_sq[int(feat_idx)] = float(np.average(v, weights=w))
+
+    # Fallback: features with no valid groups get the global mean
+    global_mean = np.nanmean(s0_sq)
+    s0_sq = np.where(np.isfinite(s0_sq) & (s0_sq > 0), s0_sq, global_mean)
+    return s0_sq, fg
+
+
+def run_moderated_linear_model(feature_data, metadata_df, config):
+    """Per-feature linear model with empirical-Bayes variance moderation.
+
+    Unified entry point for limma-/DEqMS-style moderated differential
+    analysis. ``config.moderation`` selects the prior shape:
+
+    - ``"limma"`` - global prior (Smyth 2004). Works on protein- or
+      peptide-level input; no extra columns needed.
+    - ``"deqms"`` - per-feature prior conditioned on peptide count
+      (Zhu et al. 2020). Protein-level only; reads
+      ``config.peptide_count_column`` (default ``"n_peptides"``).
+    - ``"intensity_trend"`` *(default)* - per-feature prior conditioned
+      on the intensity trend. Python equivalent of limma's
+      ``trend=TRUE``; recommended for MS data because variance is
+      clearly intensity-dependent.
+
+    When ``config.robust`` is True, the prior hyperparameters
+    ``(s0^2, d0)`` are estimated with Huber-style Winsorization so a
+    handful of genuinely high-variance features don't inflate the prior
+    and blunt every test.
+
+    Linear-trend mode
+    ~~~~~~~~~~~~~~~~~
+    Set ``config.analysis_type='linear_trend'`` with
+    ``config.time_column`` (numeric) and optional
+    ``config.subject_column`` to fit
+    ``feature ~ intercept + time + (optional subject one-hot block)``
+    per feature, and test the slope coefficient with the chosen
+    variance moderation. ``logFC`` in the output is the slope per
+    unit time (so values are small; use a small ``fc_threshold`` in
+    volcano plots). When ``moderation='intensity_trend'``, every
+    unique value of ``time_column`` contributes an anchor point per
+    feature to the LOWESS variance trend.
+
+    Parameters
+    ----------
+    feature_data : pd.DataFrame
+        Rows = features (proteins or peptides), columns = sample names.
+        For ``moderation="deqms"``, must also contain
+        ``config.peptide_count_column``. For
+        ``moderation="intensity_trend"``, intensities must be on the
+        raw (pre-log) scale (the dispatcher handles this automatically
+        by preserving a raw-scale copy before applying any log transform).
+    metadata_df : pd.DataFrame
+        Must contain a ``Sample`` column matching ``feature_data``
+        columns and the group/paired/time columns referenced by ``config``.
+    config : StatisticalConfig
+        ``analysis_type`` must be ``"unpaired"``, ``"paired"``, or
+        ``"linear_trend"``. Reads ``config.moderation``,
+        ``config.robust``, ``config.peptide_count_column``, and the
+        intensity-trend settings. ``"linear_trend"`` additionally
+        requires ``config.time_column`` and (optionally for
+        repeated-measures) ``config.subject_column``.
+
+    Returns
+    -------
+    pd.DataFrame
+        Per-feature results with columns: Protein, logFC, AveExpr, t,
+        P.Value, B, n_group1, n_group2, residual_s2, residual_df,
+        posterior_s2, posterior_df, limma_s0_sq, test_method. Plus one
+        of the following depending on moderation:
+
+        - deqms: ``peptide_count_used``, ``deqms_s0_sq``
+        - intensity_trend: ``intensity_s0_sq``, ``intensity_used``
+
+    Raises
+    ------
+    ValueError
+        If ``config.moderation`` is unrecognized or a required column is
+        missing.
+    """
+    moderation = str(getattr(config, "moderation", "intensity_trend")).lower()
+    valid_modes = {"limma", "deqms", "intensity_trend"}
+    if moderation not in valid_modes:
+        raise ValueError(f"config.moderation must be one of {sorted(valid_modes)}; got {moderation!r}.")
+
+    if moderation == "deqms":
+        count_col = getattr(config, "peptide_count_column", "n_peptides")
+        if count_col not in feature_data.columns:
+            raise ValueError(
+                f"moderation='deqms' requires a peptide-count column ({count_col!r}) "
+                f"in feature_data. Either supply protein-level data with that column, "
+                f"set config.peptide_count_column to an existing column, or use "
+                f"moderation='intensity_trend' or 'limma'."
+            )
+        counts_per_feature = feature_data[count_col].copy()
+        intensity_data = feature_data.drop(columns=[count_col])
+        print(f"Running moderated linear model (moderation='deqms', robust={bool(config.robust)})...")
+        fit = _fit_moderated_t(intensity_data, metadata_df, config)
+        counts_aligned = counts_per_feature.reindex(fit["features"]).to_numpy(dtype=float)
+        s0_sq_per_feature, counts_aligned = _fit_count_dependent_prior(fit, counts_aligned)
+        df = _moderated_results_df(fit, s0_sq_per_feature, fit["d0"], config)
+        df["peptide_count_used"] = counts_aligned
+        df["limma_s0_sq"] = fit["s0_sq"]
+        df["deqms_s0_sq"] = s0_sq_per_feature
+        print(f"Done: deqms-mode moderated t completed for {len(df)} features; d0={fit['d0']:.3g}")
+        return df
+
+    if moderation == "intensity_trend":
+        raw_data = _raw_feature_data_for_fit(feature_data, config)
+        print(f"Running moderated linear model (moderation='intensity_trend', robust={bool(config.robust)})...")
+        fit = _fit_moderated_t(feature_data, metadata_df, config)
+        s0_sq_per_feature, fg_points = _fit_intensity_trend_prior(fit, raw_data, metadata_df, config)
+        df = _moderated_results_df(fit, s0_sq_per_feature, fit["d0"], config)
+        # Summary intensity per feature: mean of per-group means (raw scale).
+        per_feature_intensity = (
+            fg_points.groupby("feature_idx", sort=True)["mean_intensity"]
+            .mean()
+            .reindex(range(len(fit["features"])))
+            .to_numpy()
+        )
+        df["intensity_used"] = per_feature_intensity
+        df["intensity_s0_sq"] = s0_sq_per_feature
+        df["limma_s0_sq"] = fit["s0_sq"]
+        # Stash the per-(feature, group) points for the diagnostic plot.
+        df.attrs["intensity_trend_points"] = fg_points
+        print(
+            f"Done: intensity_trend-mode moderated t completed for {len(df)} features; "
+            f"d0={fit['d0']:.3g}, limma s0^2={fit['s0_sq']:.3g}"
+        )
+        return df
+
+    # moderation == "limma"
+    print(f"Running moderated linear model (moderation='limma', robust={bool(config.robust)})...")
+    fit = _fit_moderated_t(feature_data, metadata_df, config)
+    s0_sq = np.full(len(fit["features"]), fit["s0_sq"])
+    df = _moderated_results_df(fit, s0_sq, fit["d0"], config)
+    print(f"Done: limma-mode moderated t completed for {len(df)} features; d0={fit['d0']:.3g}, s0^2={fit['s0_sq']:.3g}")
+    return df
+
+
+def _raw_feature_data_for_fit(feature_data, config):
+    """Return raw-intensity feature data for the intensity_trend prior fit.
+
+    When the dispatcher log-transforms upstream, it stashes the raw
+    sample columns on a module-level attribute so we can read them back
+    here. If no stash is available, assume ``feature_data`` is already
+    raw and return it unchanged. This is defensive for direct callers
+    who bypass the dispatcher.
+    """
+    stash = getattr(config, "_raw_feature_data", None)
+    if stash is not None:
+        return stash
+    return feature_data
+
+
+def get_intensity_trend_points(results_df):
+    """Return the per-(feature, group) long-form DataFrame used by the
+    intensity-trend diagnostic plot.
+
+    This DataFrame is produced by :func:`run_moderated_linear_model` when
+    ``moderation="intensity_trend"`` and stashed on
+    ``results_df.attrs["intensity_trend_points"]``. It has columns
+    ``feature_idx``, ``feature_id``, ``group``, ``n_samples``,
+    ``mean_intensity``, ``sd_intensity``, ``predicted_sd``,
+    ``predicted_variance_raw``, and ``predicted_variance_logspace``.
+
+    Raises
+    ------
+    ValueError
+        If ``results_df`` was not produced with intensity_trend moderation.
+    """
+    pts = None
+    if hasattr(results_df, "attrs"):
+        pts = results_df.attrs.get("intensity_trend_points")
+    if pts is None:
+        raise ValueError(
+            "Results DataFrame does not carry intensity-trend points. "
+            "Run run_moderated_linear_model with config.moderation='intensity_trend'."
+        )
+    return pts
+
+
+def _create_empty_result(protein_idx, reason):
+    """Create empty result for failed analysis"""
+    return {
+        "Protein": protein_idx,
+        "logFC": np.nan,
+        "AveExpr": np.nan,
+        "t": np.nan,
+        "P.Value": np.nan,
+        "B": np.nan,
+        "test_method": f"Failed: {reason}",
+    }
+
+
+def _create_empty_mixed_effects_result(protein_idx, reason):
+    """Create empty result for failed mixed-effects analysis"""
+    return {
+        "Protein": protein_idx,
+        "logFC": np.nan,
+        "AveExpr": np.nan,
+        "t": np.nan,
+        "P.Value": np.nan,
+        "B": np.nan,
+        "group_effect": np.nan,
+        "group_pvalue": np.nan,
+        "time_effect": np.nan,
+        "time_pvalue": np.nan,
+        "aic": np.nan,
+        "bic": np.nan,
+        "n_obs": 0,
+        "test_method": f"Mixed-effects failed: {reason}",
+    }
+
+
+def apply_multiple_testing_correction(results_df, config):
+    """Apply multiple testing correction"""
+
+    if "P.Value" not in results_df.columns:
+        print("Warning: No P.Value column found for correction")
+        return results_df
+
+    # Get valid p-values
+    valid_pvalues = results_df["P.Value"].dropna()
+
+    if len(valid_pvalues) == 0:
+        print("Warning: No valid p-values found")
+        results_df["adj.P.Val"] = np.nan
+        results_df["Significant"] = False
+        return results_df
+
+    # Check if correction should be applied
+    correction_method = getattr(config, "correction_method", config.use_adjusted_pvalue)
+    if correction_method == "none" or config.use_adjusted_pvalue == "none":
+        # No correction - adjusted p-values are same as raw p-values
+        results_df["adj.P.Val"] = results_df["P.Value"]
+        results_df["Significant"] = results_df["P.Value"] < config.p_value_threshold
+        print("Multiple testing correction applied:")
+        print("  Method: none (no correction)")
+        print(
+            f"  Significant proteins (p < {config.p_value_threshold}): "
+            f"{(results_df['P.Value'] < config.p_value_threshold).sum()}"
+        )
+    else:
+        # Apply correction
+        all_pvalues = results_df["P.Value"].fillna(1.0)
+        rejected, adj_pvalues, _, _ = multipletests(all_pvalues, method=correction_method)
+
+        results_df["adj.P.Val"] = adj_pvalues
+        results_df["Significant"] = rejected
+
+        print("Multiple testing correction applied:")
+        print(f"  Method: {correction_method}")
+        print(f"  Significant proteins (FDR < 0.05): {(results_df['adj.P.Val'] < 0.05).sum()}")
+
+    # Add significance categories
+    results_df["Significance"] = "Not significant"
+    results_df.loc[results_df["adj.P.Val"] < 0.05, "Significance"] = "Significant (FDR < 0.05)"
+    results_df.loc[results_df["adj.P.Val"] < 0.01, "Significance"] = "Highly significant (FDR < 0.01)"
+
+    return results_df
+
+
+def export_results(differential_df: pd.DataFrame, output_file: str, include_all: bool = True) -> None:
+    """
+    Export differential analysis results to CSV file.
+
+    Parameters:
+    -----------
+    differential_df : pd.DataFrame
+        Differential analysis results
+    output_file : str
+        Output CSV filename
+    include_all : bool
+        Whether to include all proteins or only significant ones
+    """
+
+    if not include_all:
+        export_df = differential_df[differential_df["Significant"]].copy()
+        print(f"Exporting {len(export_df)} significant proteins to {output_file}")
+    else:
+        export_df = differential_df.copy()
+        print(f"Exporting all {len(export_df)} proteins to {output_file}")
+
+    export_df.to_csv(output_file, index=False)
+    print("Results exported successfully!")
+
+
+def run_comprehensive_statistical_analysis(normalized_data, sample_metadata, config, protein_annotations=None):
+    """
+    Statistical analysis with automatic dataset validation and subject pairing
+
+    Parameters:
+    -----------
+    normalized_data : pd.DataFrame
+        Protein expression data (proteins x samples)
+    sample_metadata : dict
+        Dictionary mapping sample names to metadata
+    config : StatisticalConfig
+        Configuration object with analysis parameters
+    protein_annotations : pd.DataFrame, optional
+        DataFrame with protein annotations including 'Protein' column
+
+    Returns:
+    --------
+    pd.DataFrame
+        Results of statistical analysis
+    """
+
+    print("=" * 60)
+    print("STATISTICAL ANALYSIS")
+    print("=" * 60)
+
+    # Validate configuration
+    try:
+        config.validate()
+    except ValueError as e:
+        raise ValueError(f"Configuration error: {e}") from e
+
+    # Step 0: Handle log transformation if needed
+    statistical_data = _apply_log_transformation_if_needed(normalized_data, config)
+
+    # Step 1: Clean and validate metadata
+    print("Step 1: Cleaning and validating sample metadata...")
+
+    # Clean subject IDs to fix whitespace issues
+    cleaned_sample_metadata = {}
+    for sample_name, metadata in sample_metadata.items():
+        cleaned_metadata = metadata.copy()
+        if config.subject_column in cleaned_metadata and cleaned_metadata[config.subject_column]:
+            cleaned_metadata[config.subject_column] = str(cleaned_metadata[config.subject_column]).strip()
+        cleaned_sample_metadata[sample_name] = cleaned_metadata
+
+    sample_metadata = cleaned_sample_metadata
+
+    # Step 2: Prepare metadata dataframe
+    # IMPORTANT: With standardized data structure, sample columns start at index 5
+    # First 5 columns are always: Protein, Description, Protein Gene, UniProt_Accession, UniProt_Entry_Name
+    if len(normalized_data.columns) > 5:
+        all_sample_columns = list(normalized_data.columns[5:])  # Everything after first 5 annotation columns
+        print(f"  Using standardized data structure: {len(all_sample_columns)} sample columns (columns 6+)")
+    else:
+        # Fallback for legacy data (shouldn't happen with create_standard_data_structure)
+        all_sample_columns = normalized_data.select_dtypes(include=[np.number]).columns.tolist()
+        print(f"  Using legacy detection: {len(all_sample_columns)} sample columns")
+
+    # Filter to only samples that have metadata
+    sample_columns = [col for col in all_sample_columns if col in sample_metadata]
+
+    if len(sample_columns) < len(all_sample_columns):
+        print(f"  Filtered to {len(sample_columns)} samples with metadata (from {len(all_sample_columns)} total)")
+
+    print(f"  Sample columns: {sample_columns[:3]}{'...' if len(sample_columns) > 3 else ''}")
+
+    metadata_df = prepare_metadata_dataframe(sample_metadata, sample_columns, config)
+
+    # Step 3: Analyze experimental design
+    print("\nStep 2: Analyzing experimental design...")
+
+    # Check if this is a time-based analysis (no group comparison)
+    is_time_based = (
+        hasattr(config, "analysis_type") and config.analysis_type in ("linear_trend", "dose_response", "longitudinal")
+    ) or (
+        not hasattr(config, "group_labels")
+        or not config.group_labels
+        or not hasattr(config, "group_column")
+        or not config.group_column
+    )
+
+    if is_time_based:
+        # For time-based analyses, all samples are valid (no group filtering needed)
+        valid_samples = sample_metadata.copy()
+        if config.analysis_type == "longitudinal":
+            print("  Analysis type: LONGITUDINAL (F-test for any change over time)")
+        elif config.analysis_type in ("linear_trend", "dose_response"):
+            print("  Analysis type: LINEAR TREND (testing if slope ≠ 0)")
+        else:
+            print("  Analysis type: Time-based (no group filtering)")
+        print(f"  Valid experimental samples: {len(valid_samples)}")
+    else:
+        # Filter to experimental samples only (exclude controls) for group comparison
+        valid_samples = {}
+        # Normalize group labels once for efficiency
+        normalized_group_labels = [_normalize_group_value(label) for label in config.group_labels]
+
+        for sample_name, metadata in sample_metadata.items():
+            comparison_value = metadata.get(config.group_column)
+            # Normalize the comparison value for consistent comparison
+            normalized_comparison = _normalize_group_value(comparison_value)
+
+            if normalized_comparison in normalized_group_labels:
+                valid_samples[sample_name] = metadata
+
+        print(f"  Valid experimental samples: {len(valid_samples)}")
+
+    # Analyze subject pairing structure (only for paired/interaction designs with subject + paired columns)
+    has_pairing_info = (
+        not is_time_based
+        and config.subject_column
+        and config.paired_column
+        and hasattr(config, "analysis_type")
+        and config.analysis_type in ("paired", "interaction")
+    )
+    if has_pairing_info:
+        pairing_data = {}
+        for sample_name, metadata in valid_samples.items():
+            subject = metadata.get(config.subject_column)
+            visit = metadata.get(config.paired_column)
+            comparison = metadata.get(config.group_column)
+
+            # Use 'is not None' instead of truthy check to handle comparison=0
+            if subject and visit and comparison is not None:
+                if subject not in pairing_data:
+                    pairing_data[subject] = {}
+                pairing_data[subject][visit] = {
+                    "sample": sample_name,
+                    "comparison": comparison,
+                }
+
+        # Check for complete pairs - handle both categorical and continuous analysis
+        complete_pairs = []
+        incomplete_subjects = []
+
+        # Determine if we're doing continuous analysis (FORCE_CATEGORICAL = False for numeric variables)
+        is_continuous_analysis = (
+            hasattr(config, "force_categorical")
+            and not config.force_categorical
+            and all(str(label).replace(".", "").replace("-", "").isdigit() for label in config.group_labels)
+        )
+
+        for subject, visits in pairing_data.items():
+            if config.paired_label1 in visits and config.paired_label2 in visits:
+                baseline = visits[config.paired_label1]
+                followup = visits[config.paired_label2]
+
+                # For continuous analysis, we expect same dose at both timepoints (dose-response over time)
+                # For categorical analysis, we expect same group at both timepoints
+                if baseline["comparison"] == followup["comparison"]:
+                    complete_pairs.append(
+                        {
+                            "subject": subject,
+                            "group": baseline["comparison"],
+                            "baseline_sample": baseline["sample"],
+                            "followup_sample": followup["sample"],
+                        }
+                    )
+                else:
+                    incomplete_subjects.append(f"{subject} (mixed groups)")
+            else:
+                available_visits = list(visits.keys())
+                incomplete_subjects.append(f"{subject} (missing visits: {available_visits})")
+
+        # Group complete pairs by treatment group - normalize for comparison
+        group_pairs = {}
+        for group_label in config.group_labels:
+            normalized_group = _normalize_group_value(group_label)
+            group_pairs[group_label] = [
+                p for p in complete_pairs if _normalize_group_value(p["group"]) == normalized_group
+            ]
+
+        if is_continuous_analysis:
+            print("  Analysis type: CONTINUOUS dose-response (group variable as numeric)")
+            print(f"  Complete paired subjects: {len(complete_pairs)} (group maintained across timepoints)")
+            print("  Distribution across complete pairs:")
+            for group, pairs in group_pairs.items():
+                print(f"    {group}: {len(pairs)} subjects")
+        else:
+            print("  Analysis type: CATEGORICAL group comparison")
+            print("  Complete paired subjects by group:")
+            for group, pairs in group_pairs.items():
+                print(f"    {group}: {len(pairs)} subjects")
+
+        if incomplete_subjects:
+            print(f"  Incomplete subjects: {len(incomplete_subjects)}")
+            if len(incomplete_subjects) <= 5:  # Show details if few
+                for subject_info in incomplete_subjects:
+                    print(f"    {subject_info}")
+
+    # Step 4: Run statistical analysis
+    print(f"\nStep 3: Running {config.statistical_test_method} analysis...")
+
+    # Filter protein data to samples with metadata
+    available_samples = metadata_df["Sample"].tolist()
+    # Preserve peptide-count column for the DEqMS moderation path (otherwise
+    # only sample columns are kept). Pull the raw counts from the pre-log
+    # ``normalized_data`` so the log-transform step doesn't alter them.
+    extra_cols = []
+    is_moderated = config.statistical_test_method == "moderated_linear_model"
+    moderation = getattr(config, "moderation", "intensity_trend")
+    if is_moderated and moderation == "deqms":
+        count_col = getattr(config, "peptide_count_column", "n_peptides")
+        if count_col in statistical_data.columns:
+            extra_cols.append(count_col)
+    filtered_protein_data = statistical_data[available_samples].copy()
+    if extra_cols and count_col in normalized_data.columns:
+        filtered_protein_data[count_col] = normalized_data[count_col].values
+
+    # For the intensity_trend moderation, stash the **raw (pre-log)** sample
+    # intensities on the config object so the prior can be fit in raw space.
+    if is_moderated and moderation == "intensity_trend":
+        raw_sample_view = normalized_data[available_samples].copy()
+        if "Protein" in normalized_data.columns:
+            raw_sample_view.index = normalized_data["Protein"].values
+        config._raw_feature_data = raw_sample_view
+    else:
+        config._raw_feature_data = None
+
+    # Ensure the index contains actual protein identifiers (not integer row numbers)
+    # so that iterrows() in test functions yields meaningful Protein values
+    if "Protein" in statistical_data.columns:
+        filtered_protein_data.index = statistical_data["Protein"].values
+
+    print(f"  Method: {config.statistical_test_method}")
+    print(f"  Analysis type: {config.analysis_type if config.analysis_type else 'not specified'}")
+    print(f"  Proteins: {len(filtered_protein_data)}")
+    print(f"  Samples: {len(available_samples)}")
+
+    # Print analysis-specific parameters
+    time_col = getattr(config, "time_column", None) or getattr(config, "dose_column", None)
+    if config.analysis_type in ("linear_trend", "dose_response", "longitudinal"):
+        if time_col:
+            print(f"  Time variable: {time_col}")
+    elif config.analysis_type in ["paired", "unpaired", "interaction"]:
+        if config.group_labels:
+            print(f"  Groups: {config.group_labels}")
+        if config.paired_label1 and config.paired_label2:
+            print(f"  Timepoints: {config.paired_label1} -> {config.paired_label2}")
+
+    # Print subject grouping for mixed-effects
+    if config.subject_column:
+        print(f"  Subject grouping: {config.subject_column}")
+
+    if config.statistical_test_method == "mixed_effects":
+        print(f"  Interaction terms: {config.interaction_terms + config.additional_interactions}")
+        if config.covariates:
+            print(f"  Covariates: {config.covariates}")
+
+    # Run appropriate analysis
+    if config.statistical_test_method == "mixed_effects":
+        results_df = run_mixed_effects_analysis(filtered_protein_data, metadata_df, config, protein_annotations)
+    elif config.statistical_test_method in ["paired_t", "paired_welch"]:
+        results_df = run_paired_t_test(filtered_protein_data, metadata_df, config)
+    elif config.statistical_test_method in ["welch_t", "student_t"]:
+        results_df = run_unpaired_t_test(filtered_protein_data, metadata_df, config)
+    elif config.statistical_test_method == "wilcoxon":
+        results_df = run_wilcoxon_test(filtered_protein_data, metadata_df, config)
+    elif config.statistical_test_method == "mann_whitney":
+        results_df = run_mann_whitney_test(filtered_protein_data, metadata_df, config)
+    elif config.statistical_test_method == "moderated_linear_model":
+        results_df = run_moderated_linear_model(filtered_protein_data, metadata_df, config)
+        # Preserve the intensity-trend points across later post-processing
+        # (FDR correction + annotation merges often drop DataFrame .attrs).
+        _intensity_trend_points_stash = results_df.attrs.get("intensity_trend_points")
+    elif config.statistical_test_method in ("limma_like", "deqms_like"):
+        raise ValueError(
+            f"statistical_test_method={config.statistical_test_method!r} is no longer supported. "
+            f"Use statistical_test_method='moderated_linear_model' with "
+            f"config.moderation='limma' (for the former limma_like behaviour), "
+            f"'deqms' (for the former deqms_like behaviour), or "
+            f"'intensity_trend' (new default; Python equivalent of limma's trend=TRUE)."
+        )
+    else:
+        raise ValueError(
+            f"Unknown statistical method: {config.statistical_test_method}. "
+            f"Supported methods: mixed_effects, paired_t, paired_welch, welch_t, student_t, "
+            f"wilcoxon, mann_whitney, moderated_linear_model"
+        )
+
+    # Apply multiple testing correction
+    results_df = apply_multiple_testing_correction(results_df, config)
+
+    # Merge with protein annotations if provided
+    if protein_annotations is not None and len(protein_annotations) > 0:
+        print("\nStep 6: Adding protein annotations...")
+
+        # Get annotation columns (exclude sample columns and duplicates)
+        annotation_cols = ["Protein"]
+        potential_cols = [
+            "Description",
+            "Gene",
+            "Protein Gene",
+            "UniProt_Accession",
+            "UniProt_Entry_Name",
+            "UniProt_Database",
+        ]
+
+        for col in potential_cols:
+            if col in protein_annotations.columns:
+                annotation_cols.append(col)
+
+        # Merge statistical results with annotations
+        annotations_subset = protein_annotations[annotation_cols].copy()
+        results_df = results_df.merge(annotations_subset, on="Protein", how="left")
+
+        # Add Gene column if we have 'Protein Gene' but not 'Gene'
+        if "Protein Gene" in results_df.columns and "Gene" not in results_df.columns:
+            results_df["Gene"] = results_df["Protein Gene"]
+
+        print(f"  Added annotation columns: {annotation_cols[1:]}")  # Skip 'Protein' as it's the key
+    else:
+        print("\nStep 6: No protein annotations provided - skipping annotation merge")
+
+    # Sort by p-value
+    results_df = results_df.sort_values("P.Value")
+
+    # Re-attach per-(feature, group) intensity-trend points if the
+    # moderated-linear-model path produced them (FDR correction and
+    # annotation merges often strip DataFrame.attrs).
+    _stashed_points = locals().get("_intensity_trend_points_stash")
+    if _stashed_points is not None:
+        results_df.attrs["intensity_trend_points"] = _stashed_points
+
+    print("\nDone: Statistical analysis completed!")
+    print(f"  Total proteins analyzed: {len(results_df)}")
+    print(f"  Proteins with valid results: {results_df['P.Value'].notna().sum()}")
+    print(f"  Significant proteins (FDR < 0.05): {(results_df['adj.P.Val'] < 0.05).sum()}")
+
+    return results_df
+
+
+def display_analysis_summary(differential_results, config, label_top_n=10):
+    """
+    Display summary of statistical analysis results
+
+    Parameters:
+    -----------
+    differential_results : pd.DataFrame
+        Results from statistical analysis
+    config : StatisticalConfig
+        Configuration object with analysis parameters
+    label_top_n : int
+        Number of top significant proteins to display
+
+    Returns:
+    --------
+    dict
+        Summary statistics for downstream use
+    """
+
+    if differential_results is None or len(differential_results) == 0:
+        print("Warning: No differential analysis results available")
+        return {}
+
+    print("=" * 60)
+    print("STATISTICAL ANALYSIS SUMMARY")
+    print("=" * 60)
+
+    # Basic statistics
+    total_proteins = len(differential_results)
+    valid_results = differential_results["P.Value"].notna().sum()
+    significant_005 = (differential_results["adj.P.Val"] < 0.05).sum()
+    significant_001 = (differential_results["adj.P.Val"] < 0.01).sum()
+
+    print("Analysis Overview:")
+    print(f"  Method: {config.statistical_test_method.upper()}")
+    print(f"  Total proteins analyzed: {total_proteins:,}")
+    print(f"  Proteins with valid results: {valid_results:,}")
+    print(f"  Significant proteins (FDR < 0.05): {significant_005:,}")
+    print(f"  Highly significant (FDR < 0.01): {significant_001:,}")
+
+    if valid_results == 0:
+        print("\nError: No valid statistical results found")
+        return {}
+
+    # Show top significant results
+    successful_results = differential_results[differential_results["P.Value"].notna()]
+
+    if len(successful_results) > 0:
+        print(f"\n=== TOP {label_top_n} MOST SIGNIFICANT PROTEINS ===")
+
+        top_results = successful_results.nsmallest(label_top_n, "P.Value")
+
+        # Choose appropriate columns based on analysis type.
+        # Prefer human-readable identifiers over the internal PG#### index.
+        id_cols = [c for c in ["Gene", "UniProt_Accession", "Description"] if c in top_results.columns]
+        if not id_cols:
+            id_cols = ["Protein"]  # fall back to PG index if no annotations present
+
+        if config.statistical_test_method == "mixed_effects":
+            # Mixed-effects model results - use primary columns only
+            display_cols = id_cols + ["logFC", "P.Value", "adj.P.Val", "n_obs"]
+
+            # Note: logFC and P.Value already contain interaction results
+            # No need to show duplicate interaction_coef and interaction_pvalue
+
+        else:
+            # Traditional statistical test results
+            display_cols = id_cols + ["logFC", "P.Value", "adj.P.Val"]
+            if "Effect_Size" in top_results.columns:
+                display_cols.insert(len(id_cols), "Effect_Size")
+
+        # Filter to available columns
+        available_cols = [col for col in display_cols if col in top_results.columns]
+
+        if available_cols:
+            # Create a clean display dataframe with only the specified columns
+            display_df = pd.DataFrame()
+            for col in available_cols:
+                display_df[col] = top_results[col].copy()
+
+            # Format columns for better display
+            for col in display_df.columns:
+                if col in ["P.Value", "adj.P.Val"]:
+                    display_df[col] = display_df[col].apply(
+                        lambda x: f"{x:.2e}" if pd.notna(x) and x < 0.01 else f"{x:.6f}" if pd.notna(x) else "N/A"
+                    )
+                elif col in ["logFC", "Effect_Size"]:
+                    display_df[col] = display_df[col].apply(lambda x: f"{x:.4f}" if pd.notna(x) else "N/A")
+                elif col == "Description":
+                    # Truncate long descriptions to keep the table readable
+                    display_df[col] = display_df[col].apply(
+                        lambda x: (x[:50] + "…") if isinstance(x, str) and len(x) > 51 else x
+                    )
+
+            print(display_df.to_string(index=False))
+
+        # Additional analysis-specific summary
+        if config.statistical_test_method == "mixed_effects":
+            # Use P.Value column since it contains the interaction p-values
+            interaction_significant = (successful_results["P.Value"] < 0.05).sum()
+            print("\nInteraction Effects:")
+            print(f"  Significant {' × '.join(config.interaction_terms)} interactions: {interaction_significant}")
+
+    else:
+        print("\nError: No proteins with valid statistical results")
+
+        # Show failure reasons if available
+        failed_results = differential_results[differential_results["P.Value"].isna()]
+        if "test_method" in failed_results.columns and len(failed_results) > 0:
+            print("\nFailure Analysis:")
+            failure_reasons = failed_results["test_method"].value_counts()
+            for reason, count in failure_reasons.items():
+                print(f"  {reason}: {count}")
+
+    # Create summary dictionary for return
+    summary = {
+        "total_proteins": total_proteins,
+        "valid_results": valid_results,
+        "significant_005": significant_005,
+        "significant_001": significant_001,
+        "analysis_method": config.statistical_test_method,
+        "success_rate": valid_results / total_proteins if total_proteins > 0 else 0,
+    }
+
+    print("\nDone: Analysis summary complete!")
+
+    return summary
+
+
+# Maintain backwards compatibility
+def run_statistical_analysis(normalized_data, sample_metadata, config, protein_annotations=None):
+    """Backwards compatible wrapper for run_comprehensive_statistical_analysis"""
+    return run_comprehensive_statistical_analysis(normalized_data, sample_metadata, config, protein_annotations)
