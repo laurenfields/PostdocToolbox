@@ -35,7 +35,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from moderated_limma import StatisticalConfig, run_moderated_linear_model
 
 # PRISM loading / cryptic mapping comes from prism-diff-explorer (adjust if it moves)
-PDE_REPO = r"C:\Users\field\repos\prism-diff-explorer"
+PDE_REPO = r"G:\GitHub\prism-diff-explorer"
 sys.path.insert(0, PDE_REPO)
 import prism_diff_explorer as pde
 
