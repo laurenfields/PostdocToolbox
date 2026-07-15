@@ -234,12 +234,18 @@ class StatisticalConfig:
         # expressed as a fraction of the predictor's range. statsmodels' LOWESS
         # does a full local regression at every input point when delta=0, which
         # is O(n^2) and dominates runtime on the ~80k (feature, group) points a
-        # peptide-level fit produces (minutes). A small delta linearly
-        # interpolates between closely-spaced points; because the code already
-        # re-interpolates the smoothed curve onto every point, this is
-        # numerically indistinguishable on the smooth variance-intensity trend
-        # (max |dP| ~1e-4, all significance counts unchanged) while being ~100x
-        # faster. Set to 0.0 to force the exact O(n^2) fit.
+        # peptide-level fit produces (minutes). With delta>0 it fits only at
+        # anchor points spaced >= delta apart and linearly interpolates between
+        # them. 0.01 is statsmodels' own documented recommendation and R
+        # lowess()'s built-in default. The approximation is near-lossless here
+        # because the variance-vs-intensity trend is smooth and monotone and the
+        # span (frac=0.5) is far wider than a 1%-of-range window, so no fine
+        # structure is skipped -- empirically max |dP| ~1e-4, all significance
+        # counts unchanged, ~100x faster. (Note: the downstream np.interp re-maps
+        # the fitted curve onto every point, including delta-excluded ones, but
+        # it does not recover skipped information -- the smoothness/wide-span
+        # argument is what makes it lossless.) Set to 0.0 for the exact O(n^2)
+        # fit.
         self.lowess_delta_frac = 0.01
 
     def validate(self):
@@ -1481,13 +1487,15 @@ def _lowess_delta(x, config):
 
     Returns ``frac * (max(x) - min(x))`` so statsmodels interpolates between
     points closer than that instead of running a full local regression at
-    every point. ``frac <= 0`` (or an empty/degenerate x) returns 0.0, i.e.
-    the exact O(n^2) fit.
+    every point. A non-finite/``<= 0`` ``frac`` or an empty/degenerate x
+    returns 0.0, i.e. the exact O(n^2) fit.
     """
     frac = float(getattr(config, "lowess_delta_frac", 0.01) or 0.0)
+    if not np.isfinite(frac) or frac <= 0.0:
+        return 0.0
     xf = np.asarray(x, dtype=float)
     xf = xf[np.isfinite(xf)]
-    if frac <= 0.0 or xf.size == 0:
+    if xf.size == 0:
         return 0.0
     return frac * (float(xf.max()) - float(xf.min()))
 
