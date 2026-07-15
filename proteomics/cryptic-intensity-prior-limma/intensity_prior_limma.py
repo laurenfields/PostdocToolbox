@@ -20,7 +20,7 @@ USAGE
    available metadata columns + values and exits, so you can choose the contrast. Then set
    GROUP_COLUMN / GROUP_A_VALUES / GROUP_B_VALUES and re-run.
 3. python intensity_prior_limma.py
-   (the intensity_trend fit takes a few minutes on ~40k peptides — that's expected.)
+   (runs in a few seconds on ~40k peptides.)
 
 logFC is group B vs group A (positive = higher in B).
 """
@@ -47,12 +47,13 @@ CLINICAL_ID_COLUMN = None          # None = auto-detect the sample-id column by 
 LEVEL = "peptide"                  # cryptic peptides live at peptide level
 
 # --- the contrast: fill these in after the first run prints the options ---------------
-GROUP_COLUMN = None                # e.g. "Sample_Key"
-GROUP_A_VALUES = []                # reference group, e.g. ["Healthy control"]  (logFC baseline)
-GROUP_B_VALUES = []                # case group,      e.g. ["ALS"]              (logFC = B vs A)
+GROUP_COLUMN = "Sample_Key"                # e.g. "Sample_Key"
+GROUP_A_VALUES = ["Healthy control"]                # reference group, e.g. ["Healthy control"]  (logFC baseline)
+GROUP_B_VALUES = ["ALS"]                # case group,      e.g. ["ALS"]              (logFC = B vs A)
 
 CRYPTIC_ONLY = False               # True = write only cryptic peptides; False = all
-OUT_CSV = os.path.join(os.path.dirname(OUTPUT_DIR) or ".", "cryptic_intensity_prior_results.csv")
+OUT_CSV = r"G:\GitHub\PostdocToolbox\proteomics\cryptic-intensity-prior-limma\output_limma\cryptic_intensity_prior_results_baseline.csv"
+
 # ======================================================================================
 
 
@@ -239,4 +240,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import time
+    _t0 = time.perf_counter()
+    try:
+        main()
+    finally:
+        _dt = time.perf_counter() - _t0
+        print(f"\nTotal elapsed: {_dt:.1f} s ({_dt / 60:.2f} min)")

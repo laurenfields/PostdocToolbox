@@ -57,8 +57,10 @@ self-contained and won't break if the toolkit changes. Exposed API:
    `GROUP_COLUMN` / `GROUP_A_VALUES` / `GROUP_B_VALUES` and re-run.
 3. `python intensity_prior_limma.py`
 
-`logFC` is group **B vs A** (positive = higher in B). The `intensity_trend` fit takes a few
-minutes on ~40k peptides — expected.
+`logFC` is group **B vs A** (positive = higher in B). Runs in a few seconds on ~40k peptides.
+The LOWESS variance-trend fit uses `config.lowess_delta_frac` (default `0.01`, a fraction of
+the intensity range) to interpolate between closely-spaced points; set it to `0.0` for the
+exact — but ~100× slower — O(n²) fit.
 
 ## Output CSV columns
 
