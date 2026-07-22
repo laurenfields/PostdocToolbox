@@ -101,5 +101,5 @@ limited** (well below). Useful for knowing which knob will actually move the cyc
 
 ## Provenance
 
-Written for the Stellar DIA DSD Round 2 optimization (July 2026), generalized out of a
+Written for the Stellar DIA DSD3 optimization (July 2026), generalized out of a
 one-off analysis of 601 raw files / 582k cycles.
