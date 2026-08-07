@@ -17,9 +17,10 @@ KD_LEVEL = "TDP43_KD"
 # LOWEST. A genuine disease-DECREASE target is lowest in a DISEASE/high-pathology
 # group; "lowest in a control group" means the protein is actually UP in disease.
 CONTROL_LEVELS = {"no dementia", "hcf", "hcn", "pdcn", "hc", "not-als", "control",
-                  "normal", "cognitively normal", "healthy"}
+                  "normal", "cognitively normal", "healthy", "nonad", "lowad", "non", "low"}
 DISEASE_LEVELS = {"dementia", "add", "autosomal dominant add", "sporadic add", "pdd",
-                  "als", "pd", "hd", "ftd", "ftld", "ftld-tdp", "lbd", "dlb"}
+                  "als", "pd", "hd", "ftd", "ftld", "ftld-tdp", "lbd", "dlb",
+                  "highad", "high"}
 
 
 def disease_direction(level):
