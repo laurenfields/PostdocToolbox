@@ -13,6 +13,24 @@ from collections import defaultdict
 KD_DATASET = "ineuron_sirna_tdp43kd"
 KD_LEVEL = "TDP43_KD"
 
+# Disease-direction classification: the miner reports the level where a protein is
+# LOWEST. A genuine disease-DECREASE target is lowest in a DISEASE/high-pathology
+# group; "lowest in a control group" means the protein is actually UP in disease.
+CONTROL_LEVELS = {"no dementia", "hcf", "hcn", "pdcn", "hc", "not-als", "control",
+                  "normal", "cognitively normal", "healthy"}
+DISEASE_LEVELS = {"dementia", "add", "autosomal dominant add", "sporadic add", "pdd",
+                  "als", "pd", "hd", "ftd", "ftld", "ftld-tdp", "lbd", "dlb"}
+
+
+def disease_direction(level):
+    """DOWN_in_disease (target) / UP_in_disease / ambiguous, from the lowest level."""
+    l = str(level).strip().lower()
+    if l in DISEASE_LEVELS:
+        return "down"      # lowest in disease  -> real decrease target
+    if l in CONTROL_LEVELS:
+        return "up"        # lowest in control  -> protein rises in disease
+    return "ambiguous"     # numeric stage / genotype / other
+
 
 def is_confound(cond):
     return bool(cond) and bool(re.search(r"(?i)plate|batch|prep|acq", str(cond)))
@@ -68,6 +86,49 @@ def build(by, generated):
     L.append(f"_{len(kd)} genes show the cryptic-consistent KD-direction decrease._")
     L.append("")
 
+    # --- disease-DECREASE targets, direction-classified ---
+    # For each gene take its strongest non-KD, non-confound decrease; classify by
+    # whether the lowest level is a disease group (real decrease) or a control group.
+    dd = {"down": [], "up": [], "ambiguous": []}
+    for g, ds in by.items():
+        best = None
+        for name, x in ds.items():
+            if name == KD_DATASET or x.get("status") != "ok" or not real_bio(x):
+                continue
+            if best is None or x["n_down"] > best["n_down"]:
+                best = {"name": name, "cond": x.get("top_condition"),
+                        "lvl": x.get("top_level"), "n_down": x["n_down"],
+                        "eff": x["median_effect_log2"]}
+        if best:
+            dd[disease_direction(best["lvl"])].append((best["n_down"], best["eff"], g, best))
+
+    L.append("## 2. Disease-DECREASE targets (direction-classified)")
+    L.append("")
+    L.append("Strongest non-KD condition-linked decrease per gene, split by whether the "
+             "protein is lowest in a **disease** group (a genuine decrease-in-disease "
+             "target) vs lowest in a **control** group (protein actually rises in disease). "
+             "Any neurodegenerative stratum counts — AD/PD/FTD/DLB/ALS, brain/CSF/plasma.")
+    L.append("")
+    L.append("### 2a. DOWN in disease — decrease targets")
+    L.append("")
+    L.append("| Gene | Peptides ↓ | log2 | Dataset / condition = level |")
+    L.append("|---|---:|---:|---|")
+    for n, e, g, b in sorted(dd["down"], reverse=True):
+        L.append(f"| {g} | {n} | {e:+.2f} | {b['name']} / {b['cond']} = {b['lvl']} |")
+    L.append("")
+    L.append(f"_{len(dd['down'])} decrease-in-disease targets; "
+             f"{len(dd['ambiguous'])} ambiguous (numeric stage/genotype); "
+             f"{len(dd['up'])} lowest-in-control (up in disease — see §3)._")
+    L.append("")
+    if dd["ambiguous"]:
+        L.append("### 2b. Ambiguous (stage/genotype — check direction)")
+        L.append("")
+        L.append("| Gene | Peptides ↓ | log2 | Dataset / condition = level |")
+        L.append("|---|---:|---:|---|")
+        for n, e, g, b in sorted(dd["ambiguous"], reverse=True):
+            L.append(f"| {g} | {n} | {e:+.2f} | {b['name']} / {b['cond']} = {b['lvl']} |")
+        L.append("")
+
     # --- non-KD signal genes (disease / plasma strata) ---
     rows = []
     for g, ds in by.items():
@@ -82,7 +143,7 @@ def build(by, generated):
             rows.append((g, hits))
     rows.sort(key=lambda r: -max(h[3] for h in r[1]))
 
-    L.append("## 2. Disease / plasma-stratum signal (non-KD datasets)")
+    L.append("## 3. Disease / plasma-stratum signal — full detail (non-KD)")
     L.append("")
     L.append("Detected canonical decreases tied to a biological condition outside the KD model "
              "(AD/PD brain strata, plasma-EV cohort, iNeuron controls). Technical axes excluded.")
@@ -101,7 +162,7 @@ def build(by, generated):
             if x.get("status") == "ok" and x.get("n_subpop_specific"):
                 subs.append((g, name, x["n_subpop_specific"]))
     subs.sort(key=lambda s: -s[2])
-    L.append("## 3. Subpopulation hits (specificity-controlled)")
+    L.append("## 4. Subpopulation hits (specificity-controlled)")
     L.append("")
     L.append("| Gene | Dataset | Specific samples |")
     L.append("|---|---|---:|")
@@ -126,7 +187,7 @@ def build(by, generated):
         else:
             v = "flat"
         tally[v] += 1
-    L.append("## 4. Verdict tally")
+    L.append("## 5. Verdict tally")
     L.append("")
     L.append("| Verdict | Genes |")
     L.append("|---|---:|")
