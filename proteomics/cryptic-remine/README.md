@@ -153,6 +153,22 @@ Gotcha: the ClickOnce `SkylineCmd.exe` lives under `AppData\Local\Apps\2.0\...`;
 folder that ALSO contains `Skyline.exe`/`Skyline-daily.exe` (not merely the newest `SkylineCmd.exe`).
 Or, if a Skyline instance is open, pull the report live via the Skyline MCP instead of `SkylineCmd`.
 
+### 6. Within-protein peptide discordance (cryptic/proteoform stoichiometry)
+```bash
+# scan one dataset: does any peptide's disease response differ from its protein's siblings?
+python cryptic_remine.py discordance --dataset huad_smtg_cleandx --condition "Cognitive Status" --target Dementia
+# after scanning several, build the cross-dataset reproducible table
+python cryptic_remine.py discordance --aggregate --ad-regions huad_smtg_cleandx,huad_ipl_cleandx,huad_hipp_cleandx
+```
+A **PeCorA-style condition x peptide interaction** (batch-adjusted) per peptide: a peptide that
+drops (or rises) unlike the rest of its protein is the stoichiometry footprint of a cryptic exon
+/ proteoform — detectable even when the cryptic peptide itself was never searched. Because dense
+(Skyline-imputed) matrices make single-dataset hits unreliable, the deliverable is
+`discordance/REPRODUCIBLE_discordant_peptides.csv` — peptides discordant in the **same direction
+across >= 2 datasets**. (Validated: independently recovers the amyloid-beta APP peptide going up
+discordantly across AD regions.) Whole-protein losses (neuronal death, NMD-coupled cryptics) are
+concordant and correctly do **not** appear here — use `mine`/`confirm` for those.
+
 ## Two tiers: strict vs dive-deeper
 
 Every `mine` reports two complementary layers:

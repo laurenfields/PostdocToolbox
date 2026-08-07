@@ -1340,6 +1340,18 @@ def main(argv=None) -> int:
     ap_sky.add_argument("--out-dir", required=True, help="destination dir to register")
     ap_sky.add_argument("--format", default=None, choices=["csv", "parquet"])
 
+    ap_disc = sub.add_parser("discordance",
+                             help="proteome-wide within-protein peptide-discordance scan "
+                                  "(condition x peptide interaction) for a dataset, or "
+                                  "--aggregate the cross-dataset reproducible table")
+    ap_disc.add_argument("--dataset", default=None, help="registry name to scan")
+    ap_disc.add_argument("--condition", default=None, help="metadata column for the contrast")
+    ap_disc.add_argument("--target", default=None, help="disease level of --condition")
+    ap_disc.add_argument("--covariate", default="batch", help="batch/plate column to adjust for")
+    ap_disc.add_argument("--aggregate", action="store_true",
+                         help="build the reproducible cross-dataset table from existing scans")
+    ap_disc.add_argument("--ad-regions", default="", help="comma list of dataset names to flag as AD regions")
+
     ap_find = sub.add_parser("findings", help="(re)generate the plain-language findings.md")
 
     ap_fa = sub.add_parser("make-fasta",
@@ -1389,6 +1401,18 @@ def main(argv=None) -> int:
               f"{r['replicates']} replicates, {r['genes']} genes  ({r['out_dir']})")
         print("Register in datasets.yaml:  prism_dir: <out-dir>  "
               "peptide_matrix: peptides.parquet  merged_data: merged_data.parquet")
+        return 0
+
+    if args.cmd == "discordance":
+        import discordance as _disc
+        if args.aggregate:
+            _disc.aggregate(args.db_dir, ad_regions=[s for s in args.ad_regions.split(",") if s])
+        elif args.dataset and args.condition and args.target:
+            _disc.scan_dataset(args.db_dir, args.dataset, args.condition, args.target,
+                               covariate=args.covariate)
+        else:
+            print("give --dataset --condition --target to scan, or --aggregate")
+            return 1
         return 0
 
     if args.cmd == "confirm":
