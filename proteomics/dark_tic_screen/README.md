@@ -53,7 +53,12 @@ Key options:
 | `--rt-range lo,hi` | restrict to a retention-time window in minutes (e.g. `5,20`) |
 | `--ppm` | match tolerance (default 10) |
 | `--top` | number of top features inspected for novelty (default 200) |
+| `--no-rt-gate` | report has no per-run RT peak boundaries: subtract each ID's fragments across all RT in its window, giving a **conservative lower-bound** dark (the coarse tier is not meaningful in this mode). Use when only a precursor list is available (e.g. a Panorama abundance table). |
 | `--out DIR` | write `coarse_summary.parquet` (per-run assigned/dark fractions) |
+
+Modified-sequence masses shown rounded by Skyline (`C[+57]`, `M[+16]`) are snapped to the
+exact modification mass, so a report exported with integer mass display still fragments
+correctly.
 
 ### Example (Skyline document)
 
@@ -101,4 +106,6 @@ drop to the fine screen only on the ones that flag high *and* have raw files ava
 ## Provenance
 
 Generalized from the Latimer plasma-EV dark-TIC investigation (stages 01/02 coarse,
-03 subtraction, 27 concentration, 28 delta-mass). MIT licensed.
+03 subtraction, 27 concentration, 28 delta-mass). Validated on external Panorama Public
+data (MacCoss mouse plasma-EV Astral DIA, PXD080860): a clean NEGATIVE verdict (diffuse
+dark, no high-abundance novel feature, no proteoform signal). MIT licensed.

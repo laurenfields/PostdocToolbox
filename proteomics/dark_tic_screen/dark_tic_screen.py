@@ -55,6 +55,10 @@ MODS = {"deamid +0.98": 0.98402, "methyl +14.02": 14.01565, "oxid +15.99": 15.99
         "water_loss -18.01": -18.01056, "dioxid +31.99": 31.98983,
         "acetyl +42.01": 42.01057, "trimethyl +42.05": 42.04695, "phospho +79.97": 79.96633}
 DECOYS = [11.531, 23.273, 37.711, 6.191, 61.442, 88.131, 51.007, 70.884]
+# snap a rounded bracket mass (Skyline display, e.g. C[+57]) to the exact mod mass
+_SNAP = {57: 57.02146372, 16: 15.99491462, 80: 79.96633052, 42: 42.01056468,
+         1: 0.98401558, 14: 14.01565006, 43: 43.00581368, 32: 31.98982924,
+         -17: -17.02654910, -18: -18.01056468, 28: 28.03130013, 100: 100.01604399}
 
 
 # --- modified-sequence parsing (DIA-NN/Skyline UnimodIds and bracket-mass) ----------
@@ -77,6 +81,9 @@ def parse_residue_masses(mod_seq: str):
         else:
             try:
                 m = float(body.replace("+", ""))
+                r = round(m)                      # Skyline often shows rounded mass, e.g.
+                if abs(m - r) < 0.5 and r in _SNAP:  # C[+57] -> snap to exact 57.02146
+                    m = _SNAP[r]
             except ValueError:
                 m = 0.0
         return m, k + 1
@@ -171,8 +178,11 @@ def load_report(path, cols):
     c_pmz = pick(["PrecursorMz", "Precursor.Mz", "PrecursorMzCalc"], cols["pmz"])
     c_pch = pick(["PrecursorCharge", "Charge", "Precursor.Charge"], cols["pch"])
     c_rep = pick(["ReplicateName", "Run", "FileName", "R.FileName"], cols["rep"])
-    c_st = pick(["StartTime", "MinStartTime", "RT.Start", "EG.StartRT"], cols["start"])
-    c_en = pick(["EndTime", "MaxEndTime", "RT.Stop", "EG.EndRT"], cols["end"])
+    no_rt = cols.get("no_rt")
+    c_st = c_en = None
+    if not no_rt:
+        c_st = pick(["StartTime", "MinStartTime", "RT.Start", "EG.StartRT"], cols["start"])
+        c_en = pick(["EndTime", "MaxEndTime", "RT.Stop", "EG.EndRT"], cols["end"])
     c_q = None
     if not cols["all_ids"]:
         for c in ["DetectionQValue", "QValue", "Q.Value", "PEP"]:
@@ -188,7 +198,8 @@ def load_report(path, cols):
                 continue                        # confident = q reported (Skyline emits q<=0.01)
         try:
             pmz = float(tbl[c_pmz][i]); pch = int(float(tbl[c_pch][i]))
-            st = float(tbl[c_st][i]); en = float(tbl[c_en][i])
+            st = -1e9 if no_rt else float(tbl[c_st][i])
+            en = 1e9 if no_rt else float(tbl[c_en][i])
         except (TypeError, ValueError):
             continue
         rep = str(tbl[c_rep][i])
@@ -321,12 +332,15 @@ def main():
     ap.add_argument("--rt-range", default="0,1e9", help="RT window in minutes, 'lo,hi'")
     ap.add_argument("--top", type=int, default=200, help="top-N features to inspect for novelty")
     ap.add_argument("--all-ids", action="store_true", help="treat every report row as confident (ignore q-value)")
+    ap.add_argument("--no-rt-gate", action="store_true", help="report has no RT peak boundaries: "
+                    "subtract each ID's fragments across ALL RT in its window (conservative lower-bound dark; "
+                    "the coarse tier is not meaningful in this mode)")
     for c in ["seq", "pmz", "pch", "rep", "start", "end"]:
         ap.add_argument(f"--col-{c}", default=None)
     a = ap.parse_args()
     rt_lo, rt_hi = (float(x) for x in a.rt_range.split(","))
     cols = dict(seq=a.col_seq, pmz=a.col_pmz, pch=a.col_pch, rep=a.col_rep,
-                start=a.col_start, end=a.col_end, all_ids=a.all_ids)
+                start=a.col_start, end=a.col_end, all_ids=a.all_ids, no_rt=a.no_rt_gate)
 
     report = load_report(a.report, cols)
     raws = sorted(glob.glob(a.raws if any(c in a.raws for c in "*?[") else os.path.join(a.raws, "*.raw")))
