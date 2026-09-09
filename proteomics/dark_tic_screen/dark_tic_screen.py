@@ -155,7 +155,9 @@ def load_report(path, cols):
         import csv
         tbl = defaultdict(list)
         with open(path, newline="", encoding="utf-8-sig") as f:
-            for row in csv.DictReader(f):
+            first = f.readline(); f.seek(0)
+            delim = "\t" if first.count("\t") > first.count(",") else ","  # sniff CSV vs TSV
+            for row in csv.DictReader(f, delimiter=delim):
                 for k, v in row.items():
                     tbl[k].append(v)
     keys = list(tbl)
