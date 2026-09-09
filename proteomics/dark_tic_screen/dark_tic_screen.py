@@ -196,8 +196,11 @@ def load_report(path, cols):
     for i in range(n):
         if c_q is not None:
             qv = tbl[c_q][i]
-            if qv in (None, "", "NA", "#N/A") or (isinstance(qv, float) and np.isnan(qv)):
-                continue                        # confident = q reported (Skyline emits q<=0.01)
+            try:
+                if qv in (None, "", "NA", "#N/A") or float(qv) > cols.get("qmax", 0.01):
+                    continue                    # confident = q at or below threshold
+            except (TypeError, ValueError):
+                continue
         try:
             pmz = float(tbl[c_pmz][i]); pch = int(float(tbl[c_pch][i]))
             st = -1e9 if no_rt else float(tbl[c_st][i])
@@ -206,6 +209,66 @@ def load_report(path, cols):
             continue
         rep = str(tbl[c_rep][i])
         out[rep].append(dict(mod_seq=str(tbl[c_seq][i]), pmz=pmz, pch=pch, start=st, end=en))
+    return out
+
+
+def is_transition_level(path):
+    """A Skyline/PRISM transition report (e.g. merged_data.parquet) has one row per
+    fragment, flagged by a FragmentIon / ProductMz column. Needs per-precursor rollup."""
+    if not path.lower().endswith((".parquet", ".pq")):
+        return False
+    import pyarrow.parquet as pq
+    names = [n.lower() for n in pq.read_schema(path).names]
+    return any(k in names for k in ("fragmention", "productmz", "producttype"))
+
+
+def report_from_transitions(path, target_stem, cols):
+    """Roll a transition-level Skyline/PRISM parquet (merged_data) down to one
+    per-precursor report for ONE replicate, via duckdb (streaming, memory-safe):
+    min(StartTime)/max(EndTime), PrecursorMz, min(DetectionQValue). Confident = q
+    reported unless --all-ids. Returns {stem: [ {mod_seq,pmz,pch,start,end}, ... ]}."""
+    import duckdb, pyarrow.parquet as pq
+    names = pq.read_schema(path).names
+
+    def pick(cands, override):
+        if override:
+            return override
+        low = {n.lower(): n for n in names}
+        for c in cands:
+            if c.lower() in low:
+                return low[c.lower()]
+        for c in cands:
+            for n in names:
+                if c.lower() in n.lower():
+                    return n
+        raise SystemExit(f"[dark-tic] transition report missing a column among {cands}; "
+                         f"have: {names}")
+    seq = pick(["PeptideModifiedSequenceUnimodIds", "ModifiedSequence", "PeptideModifiedSequence"], cols["seq"])
+    pmz = pick(["PrecursorMz", "Precursor.Mz"], cols["pmz"])
+    pch = pick(["PrecursorCharge", "Charge"], cols["pch"])
+    rep = pick(["ReplicateName", "FileName", "Run"], cols["rep"])
+    st = pick(["StartTime", "MinStartTime"], cols["start"])
+    en = pick(["EndTime", "MaxEndTime"], cols["end"])
+    qcol = None
+    if not cols["all_ids"]:
+        low = {n.lower(): n for n in names}
+        for c in ["detectionqvalue", "qvalue", "q.value", "pep"]:
+            if c in low:
+                qcol = low[c]; break
+    qmax = cols.get("qmax", 0.01)
+    qflt = f'AND "{qcol}" <= {qmax}' if qcol else ""   # confident = q at or below threshold
+    con = duckdb.connect(); con.execute("PRAGMA threads=4")
+    rows = con.execute(f'''
+        SELECT "{seq}" AS seq, CAST("{pch}" AS INTEGER) AS pch,
+               any_value("{pmz}") AS pmz, min("{st}") AS start, max("{en}") AS en
+        FROM read_parquet(?)
+        WHERE ("{rep}" = ? OR "{rep}" LIKE ?) {qflt}
+          AND "{st}" IS NOT NULL AND "{en}" IS NOT NULL
+        GROUP BY "{seq}", "{pch}"''',
+        [path, target_stem, f"%{target_stem}%"]).fetchall()
+    con.close()
+    out = {target_stem: [dict(mod_seq=r[0], pch=int(r[1]), pmz=float(r[2]),
+                              start=float(r[3]), end=float(r[4])) for r in rows]}
     return out
 
 
@@ -334,6 +397,7 @@ def main():
     ap.add_argument("--rt-range", default="0,1e9", help="RT window in minutes, 'lo,hi'")
     ap.add_argument("--top", type=int, default=200, help="top-N features to inspect for novelty")
     ap.add_argument("--all-ids", action="store_true", help="treat every report row as confident (ignore q-value)")
+    ap.add_argument("--qvalue-max", type=float, default=0.01, help="confident ID cutoff on the q-value column (default 0.01)")
     ap.add_argument("--no-rt-gate", action="store_true", help="report has no RT peak boundaries: "
                     "subtract each ID's fragments across ALL RT in its window (conservative lower-bound dark; "
                     "the coarse tier is not meaningful in this mode)")
@@ -342,20 +406,24 @@ def main():
     a = ap.parse_args()
     rt_lo, rt_hi = (float(x) for x in a.rt_range.split(","))
     cols = dict(seq=a.col_seq, pmz=a.col_pmz, pch=a.col_pch, rep=a.col_rep,
-                start=a.col_start, end=a.col_end, all_ids=a.all_ids, no_rt=a.no_rt_gate)
+                start=a.col_start, end=a.col_end, all_ids=a.all_ids, no_rt=a.no_rt_gate, qmax=a.qvalue_max)
 
-    report = load_report(a.report, cols)
+    tx = is_transition_level(a.report)          # e.g. PRISM merged_data (transition-level)
+    report = None if tx else load_report(a.report, cols)
+    def get_ids(stem):
+        return report_from_transitions(a.report, stem, cols).get(stem, []) if tx else ids_for_raw(stem, report)
     raws = sorted(glob.glob(a.raws if any(c in a.raws for c in "*?[") else os.path.join(a.raws, "*.raw")))
     if not raws:
         raise SystemExit(f"[dark-tic] no .raw files under {a.raws}")
-    print(f"[dark-tic] {len(report)} replicates in report; {len(raws)} raw files\n")
+    src = "transition-level report (per-file rollup via duckdb)" if tx else f"{len(report)} replicates in report"
+    print(f"[dark-tic] {src}; {len(raws)} raw files\n")
 
     print(f"[dark-tic] COARSE (assigned vs dark MS2 ion current per run):")
     print(f"  {'run':44} {'nID':>6} {'dark_TIC%':>9} {'dark_scans%':>11}")
     coarse = []
     for rp in raws:
         stem = os.path.splitext(os.path.basename(rp))[0]
-        ids = ids_for_raw(stem, report)
+        ids = get_ids(stem)
         r = screen_run(rp, ids, a.ppm, rt_lo, rt_hi, fine=False)
         coarse.append((stem, len(ids), r))
         print(f"  {stem[:44]:44} {len(ids):>6} {r['dark_scan_tic_frac']*100:>8.1f} "

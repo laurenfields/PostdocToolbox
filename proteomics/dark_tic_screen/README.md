@@ -96,9 +96,36 @@ drop to the fine screen only on the ones that flag high *and* have raw files ava
   is suggestive, and the decoy calibration is what keeps it honest. Confirm any flag with
   a proper open/targeted search.
 
+## Running from PRISM / Skyline transition reports (e.g. `merged_data.parquet`)
+
+Point `--report` straight at a **transition-level** Skyline/PRISM parquet (one row per
+fragment, with a `FragmentIon`/`ProductMz` column, such as PRISM's `merged_data.parquet`).
+Both tools auto-detect it and roll it up per-precursor with duckdb (streaming, so the
+88M-row file never loads into memory): `min(StartTime)`/`max(EndTime)`, `PrecursorMz`, and
+a confident-ID cutoff of `DetectionQValue <= --qvalue-max` (default 0.01) for the requested
+run. This reproduces a Skyline peak-boundary report exactly, and it is the source your PRISM
+notes point to for real detection.
+
+```bash
+python dark_tic_dashboard.py --report prism_output_dir/merged_data.parquet --raw run.raw --out dash.html
+```
+
+Do **not** use PRISM's `corrected_*.parquet` (the rolled-up abundance matrix): it has no
+precursor m/z and no per-run RT boundaries, and its cells are imputed - it cannot drive the
+assigned-vs-dark accounting or the RT map.
+
+## dark_tic_dashboard.py - one-command visual dashboard
+
+`dark_tic_dashboard.py --report <report> --raw <one .raw> --out dash.html` writes a single
+self-contained HTML page (charts embedded, no server) for one Skyline+raw pair: where the
+ion current goes (MS1/MS2, assigned vs dark), a retention-time x window darkness map, the
+dark concentration curve, the top unexplained features with delta-mass flags, and a
+FLAG/NEGATIVE verdict. It auto-opens the page unless `--no-open`. Same `--col-*`,
+`--no-rt-gate`, `--qvalue-max`, and PRISM auto-detection as the screen.
+
 ## Dependencies
 
-- Python ≥ 3.9, `numpy`, `pyarrow`.
+- Python ≥ 3.9, `numpy`, `pyarrow`, `duckdb` (transition-report rollup), `matplotlib` (dashboard).
 - The sibling PostdocToolbox reader `proteomics/thermo_raw/thermo_raw_reader.py`
   (pythonnet + ProteoWizard's ThermoFisher CommonCore DLLs). Point it at your install
   with `THERMO_RAW_DLL_DIR` if needed. Thermo `.raw` only.

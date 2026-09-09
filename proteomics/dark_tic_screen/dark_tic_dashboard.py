@@ -211,15 +211,21 @@ def main():
     ap.add_argument("--ppm", type=float, default=10.0)
     ap.add_argument("--top", type=int, default=200)
     ap.add_argument("--all-ids", action="store_true")
+    ap.add_argument("--qvalue-max", type=float, default=0.01, help="confident ID cutoff on the q-value column (default 0.01)")
     ap.add_argument("--no-rt-gate", action="store_true")
     ap.add_argument("--no-open", action="store_true", help="don't auto-open the HTML")
     for c in ["seq", "pmz", "pch", "rep", "start", "end"]:
         ap.add_argument(f"--col-{c}", default=None)
     a = ap.parse_args()
     cols = dict(seq=a.col_seq, pmz=a.col_pmz, pch=a.col_pch, rep=a.col_rep,
-                start=a.col_start, end=a.col_end, all_ids=a.all_ids, no_rt=a.no_rt_gate)
-    report = E.load_report(a.report, cols)
+                start=a.col_start, end=a.col_end, all_ids=a.all_ids, no_rt=a.no_rt_gate, qmax=a.qvalue_max)
     stem = os.path.splitext(os.path.basename(a.raw))[0]
+    if E.is_transition_level(a.report):
+        print(f"[dashboard] transition-level report (e.g. PRISM merged_data) detected -> "
+              f"rolling up per-precursor for {stem} via duckdb...")
+        report = E.report_from_transitions(a.report, stem, cols)
+    else:
+        report = E.load_report(a.report, cols)
     ids = E.ids_for_raw(stem, report)
     if not ids:
         raise SystemExit(f"[dashboard] no identifications matched raw stem '{stem}'. "
