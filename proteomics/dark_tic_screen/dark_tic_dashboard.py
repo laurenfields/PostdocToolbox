@@ -40,8 +40,9 @@ def collect(rawpath, ids, ppm, no_rt, top):
         by = E.build_window_ids(ids, wt)
         win_full = {w: np.sort(np.unique(np.concatenate([e["frag"] for e in es])))
                     for w, es in by.items()}
-        ms1_tic = ms2_tic = dark_scan_tic = 0.0
-        n_ms1 = n_ms2 = n_dark = 0
+        valid = {w["win_idx"] for w in wt}
+        ms1_tic = ms2_tic = dark_scan_tic = unassigned_tic = 0.0
+        n_ms1 = n_ms2 = n_dark = n_unassigned = 0
         dmap = defaultdict(lambda: [0.0, 0.0])      # (rt_bin, win) -> [tic, dark_tic]
         wins = set()
         acc = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
@@ -54,9 +55,11 @@ def collect(rawpath, ids, ppm, no_rt, top):
             if h.ms_level != 2:
                 continue
             w = assign_window_index(h.center_mz, wt)
+            ms2_tic += h.tic; n_ms2 += 1
+            if w not in valid:                      # scan not mappable to a window
+                unassigned_tic += h.tic; n_unassigned += 1; continue  # (e.g. overlapping DIA)
             es = by.get(w)
             active = [e for e in es if e["start"] <= h.rt_min <= e["end"]] if es else []
-            ms2_tic += h.tic; n_ms2 += 1
             rt_lo_seen = min(rt_lo_seen, h.rt_min); rt_hi_seen = max(rt_hi_seen, h.rt_min)
             lit = bool(active)
             if not lit:
@@ -83,7 +86,8 @@ def collect(rawpath, ids, ppm, no_rt, top):
     return dict(ms1_tic=ms1_tic, ms2_tic=ms2_tic, dark_scan_tic=dark_scan_tic,
                 n_ms1=n_ms1, n_ms2=n_ms2, n_dark=n_dark, dmap=dict(dmap), wins=sorted(wins),
                 dark_total=dark_total, fine=fine, rt_lo=rt_lo_seen, rt_hi=rt_hi_seen,
-                n_ids=len(ids), wt_lo={w["win_idx"]: w["lo_mz"] for w in wt})
+                n_ids=len(ids), wt_lo={w["win_idx"]: w["lo_mz"] for w in wt},
+                unassigned_tic=unassigned_tic, n_unassigned=n_unassigned)
 
 
 def _png(fig):
@@ -101,13 +105,16 @@ def figures(r, no_rt):
 
     # 1. TIC coverage: MS1 vs MS2; MS2 assigned vs dark (by intensity)
     total = r["ms1_tic"] + r["ms2_tic"]
-    assigned = max(r["ms2_tic"] - r["dark_total"], 0.0)
+    un = r.get("unassigned_tic", 0.0)
+    assigned = max(r["ms2_tic"] - r["dark_total"] - un, 0.0)
     fig, ax = plt.subplots(figsize=(6.6, 2.4))
     ax.barh(1, r["ms1_tic"] / total * 100, color="#8FB7C9", label="MS1 (survey)")
     ax.barh(1, r["ms2_tic"] / total * 100, left=r["ms1_tic"] / total * 100, color="#4B3F8F", label="MS2 (fragment)")
-    a2 = assigned / total * 100; d2 = r["dark_total"] / total * 100
+    a2 = assigned / total * 100; d2 = r["dark_total"] / total * 100; u2 = un / total * 100
     ax.barh(0, a2, color=TEAL, label="MS2 assigned to IDs")
     ax.barh(0, d2, left=a2, color=ORANGE, label="MS2 dark")
+    if u2 > 0:
+        ax.barh(0, u2, left=a2 + d2, color=GREY, label="MS2 unassigned window")
     ax.set_yticks([0, 1]); ax.set_yticklabels(["MS2 breakdown", "MS1 / MS2"])
     ax.set_xlim(0, 100); ax.set_xlabel("% of total ion current")
     ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.35), ncol=2, frameon=False, fontsize=8)
@@ -115,13 +122,14 @@ def figures(r, no_rt):
     out["coverage"] = _png(fig)
 
     # 2. darkness map (RT x window), skipped in no_rt
-    if not no_rt and r["dmap"]:
-        wins = r["wins"]; wi = {w: k for k, w in enumerate(wins)}
-        rbs = sorted({rb for rb, w in r["dmap"]})
+    wins = [w for w in r.get("wins", []) if w in r["wt_lo"]]
+    if not no_rt and r["dmap"] and wins:
+        wi = {w: k for k, w in enumerate(wins)}
+        rbs = sorted({rb for rb, w in r["dmap"] if w in wi})
         ri = {rb: k for k, rb in enumerate(rbs)}
         grid = np.full((len(wins), len(rbs)), np.nan)
         for (rb, w), (tic, dk) in r["dmap"].items():
-            if tic > 0:
+            if tic > 0 and w in wi and rb in ri:
                 grid[wi[w], ri[rb]] = dk / tic
         fig, ax = plt.subplots(figsize=(7.2, 3.4))
         im = ax.imshow(grid, aspect="auto", origin="lower", cmap="magma_r", vmin=0, vmax=1,
@@ -155,13 +163,25 @@ def html(r, figs, no_rt, run, verdict):
     coarse_dark = r["dark_scan_tic"] / r["ms2_tic"] * 100 if r["ms2_tic"] else 0
     fine_dark = r["dark_total"] / r["ms2_tic"] * 100 if r["ms2_tic"] else 0
     nov = f["novel"]; nmod = sum(1 for x in nov if x["mod_hits"]); ndec = sum(1 for x in nov if x["n_decoy_hits"])
+    un_frac = r.get("n_unassigned", 0) / max(r["n_ms2"], 1) * 100
     tiles = [("identified precursors", f"{r['n_ids']:,}"),
              ("MS1 / MS2 of TIC", f"{r['ms1_tic']/total*100:.0f}% / {r['ms2_tic']/total*100:.0f}%"),
              ("MS2 dark (intensity)", f"{fine_dark:.1f}%"),
              ("MS2 dark (scan-level)", "n/a" if no_rt else f"{coarse_dark:.1f}%"),
              ("dark features to 50%", f"{f['feats_to_50pct']:,}"),
              ("top feature", f"{f['top1_pct']:.2f}% of dark")]
+    if un_frac >= 1:
+        tiles.append(("MS2 scans unassigned to a window", f"{un_frac:.0f}%"))
     tilehtml = "".join(f'<div class=tile><div class=big>{v}</div><div class=lab>{k}</div></div>' for k, v in tiles)
+    warn = ""
+    if un_frac >= 5:
+        warn = (f'<div style="background:#FBEEE4;border-left:3px solid #C65A1E;border-radius:8px;'
+                f'padding:12px 16px;margin:14px 0;font-size:13px;color:#7A3E14">'
+                f'<b>{un_frac:.0f}% of MS2 scans could not be mapped to a fixed isolation window</b> '
+                f'(their center m/z falls outside the windows inferred from the first cycle). This is '
+                f'expected for overlapping / staggered DIA (e.g. "ovlp" acquisitions), which this tool '
+                f'does not fully resolve; those scans are excluded from the accounting below, so the '
+                f'assigned-vs-dark split describes only the mappable windows.</div>')
     rows = ""
     for x in [y for y in nov if y["pct_dark"] >= 0.2][:20]:
         rows += (f"<tr><td>{x['mz']:.4f}</td><td>{x['z']}</td><td>{x['rt']:.1f}</td>"
@@ -188,6 +208,7 @@ th{{color:#64607A;font-size:11px;text-transform:uppercase}}
 <div class=wrap>
 <h1>Dark-TIC dashboard</h1><p class=sub>{run}</p>
 <div class=verdict>{verdict}</div>
+{warn}
 <div class=tiles>{tilehtml}</div>
 <h2>1 · Where the ion current goes</h2>
 <p class=cap>Top: MS1 survey vs MS2 fragment ion current. Bottom: of the MS2 current, how much is explained by identified peptides (teal) vs dark (orange).{" Conservative lower-bound dark (no RT boundaries)." if no_rt else ""}</p>
@@ -239,6 +260,10 @@ def main():
     print(f"[dashboard] {stem}: {len(ids):,} IDs; reading raw + building dashboard...")
     r = collect(a.raw, ids, a.ppm, a.no_rt_gate, a.top)
     f = r["fine"]
+    un_frac = r.get("n_unassigned", 0) / max(r["n_ms2"], 1) * 100
+    if un_frac >= 5:
+        print(f"[dashboard] WARNING: {un_frac:.0f}% of MS2 scans did not map to a fixed window "
+              f"(overlapping/staggered DIA not fully supported); excluded from the accounting.")
     big = [x for x in f["novel"] if x["pct_dark"] >= 0.5]
     nmod = sum(1 for x in f["novel"] if x["mod_hits"]); ndec = sum(1 for x in f["novel"] if x["n_decoy_hits"])
     verdict = ("FLAG - high-intensity unexplained proteoform-like signal; worth a targeted open/delta-mass search."
