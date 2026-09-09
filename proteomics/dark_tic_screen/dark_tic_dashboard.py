@@ -103,21 +103,28 @@ def figures(r, no_rt):
     TEAL, ORANGE, GREY, INK, MUT = "#148F84", "#C65A1E", "#C9C6D6", "#191723", "#64607A"
     out = {}
 
-    # 1. TIC coverage: MS1 vs MS2; MS2 assigned vs dark (by intensity)
-    total = r["ms1_tic"] + r["ms2_tic"]
+    # 1. TIC coverage: MS1 vs MS2 (if MS1 present); MS2 assigned vs dark (by intensity)
     un = r.get("unassigned_tic", 0.0)
     assigned = max(r["ms2_tic"] - r["dark_total"] - un, 0.0)
-    fig, ax = plt.subplots(figsize=(6.6, 2.4))
-    ax.barh(1, r["ms1_tic"] / total * 100, color="#8FB7C9", label="MS1 (survey)")
-    ax.barh(1, r["ms2_tic"] / total * 100, left=r["ms1_tic"] / total * 100, color="#4B3F8F", label="MS2 (fragment)")
-    a2 = assigned / total * 100; d2 = r["dark_total"] / total * 100; u2 = un / total * 100
-    ax.barh(0, a2, color=TEAL, label="MS2 assigned to IDs")
-    ax.barh(0, d2, left=a2, color=ORANGE, label="MS2 dark")
+    no_ms1 = r.get("n_ms1", 0) == 0
+    denom = r["ms2_tic"] if no_ms1 else (r["ms1_tic"] + r["ms2_tic"])
+    denom = denom or 1.0
+    fig, ax = plt.subplots(figsize=(6.6, 2.0 if no_ms1 else 2.4))
+    if not no_ms1:
+        ax.barh(1, r["ms1_tic"] / denom * 100, color="#8FB7C9", label="MS1 (survey)")
+        ax.barh(1, r["ms2_tic"] / denom * 100, left=r["ms1_tic"] / denom * 100, color="#4B3F8F", label="MS2 (fragment)")
+    a2 = assigned / denom * 100; d2 = r["dark_total"] / denom * 100; u2 = un / denom * 100
+    ax.barh(0, a2, color=TEAL, label="assigned to IDs")
+    ax.barh(0, d2, left=a2, color=ORANGE, label="dark")
     if u2 > 0:
-        ax.barh(0, u2, left=a2 + d2, color=GREY, label="MS2 unassigned window")
-    ax.set_yticks([0, 1]); ax.set_yticklabels(["MS2 breakdown", "MS1 / MS2"])
-    ax.set_xlim(0, 100); ax.set_xlabel("% of total ion current")
-    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.35), ncol=2, frameon=False, fontsize=8)
+        ax.barh(0, u2, left=a2 + d2, color=GREY, label="unassigned window")
+    if no_ms1:
+        ax.set_yticks([0]); ax.set_yticklabels(["MS2"])
+    else:
+        ax.set_yticks([0, 1]); ax.set_yticklabels(["MS2 breakdown", "MS1 / MS2"])
+    ax.set_xlim(0, 100)
+    ax.set_xlabel("% of MS2 ion current" if no_ms1 else "% of total ion current")
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.4), ncol=3, frameon=False, fontsize=8)
     for sp in ("top", "right"): ax.spines[sp].set_visible(False)
     out["coverage"] = _png(fig)
 
@@ -164,8 +171,10 @@ def html(r, figs, no_rt, run, verdict):
     fine_dark = r["dark_total"] / r["ms2_tic"] * 100 if r["ms2_tic"] else 0
     nov = f["novel"]; nmod = sum(1 for x in nov if x["mod_hits"]); ndec = sum(1 for x in nov if x["n_decoy_hits"])
     un_frac = r.get("n_unassigned", 0) / max(r["n_ms2"], 1) * 100
+    no_ms1 = r.get("n_ms1", 0) == 0
     tiles = [("identified precursors", f"{r['n_ids']:,}"),
-             ("MS1 / MS2 of TIC", f"{r['ms1_tic']/total*100:.0f}% / {r['ms2_tic']/total*100:.0f}%"),
+             ("MS1 / MS2 of TIC",
+              "MS2-only" if no_ms1 else f"{r['ms1_tic']/total*100:.0f}% / {r['ms2_tic']/total*100:.0f}%"),
              ("MS2 dark (intensity)", f"{fine_dark:.1f}%"),
              ("MS2 dark (scan-level)", "n/a" if no_rt else f"{coarse_dark:.1f}%"),
              ("dark features to 50%", f"{f['feats_to_50pct']:,}"),
@@ -174,6 +183,13 @@ def html(r, figs, no_rt, run, verdict):
         tiles.append(("MS2 scans unassigned to a window", f"{un_frac:.0f}%"))
     tilehtml = "".join(f'<div class=tile><div class=big>{v}</div><div class=lab>{k}</div></div>' for k, v in tiles)
     warn = ""
+    if no_ms1:
+        warn += ('<div style="background:#EEF2F7;border-left:3px solid #4B3F8F;border-radius:8px;'
+                 'padding:12px 16px;margin:14px 0;font-size:13px;color:#3A3560">'
+                 'This mzML has <b>no MS1 survey scans</b> (MS2-only, e.g. after demultiplexing), so '
+                 'the MS1/MS2 split is not shown and every percentage below is of the <b>MS2</b> ion '
+                 'current. The dark accounting is an MS2 measurement and is unaffected; use the original '
+                 '.raw if you also want the MS1/MS2 context.</div>')
     if un_frac >= 5:
         warn = (f'<div style="background:#FBEEE4;border-left:3px solid #C65A1E;border-radius:8px;'
                 f'padding:12px 16px;margin:14px 0;font-size:13px;color:#7A3E14">'
@@ -211,7 +227,7 @@ th{{color:#64607A;font-size:11px;text-transform:uppercase}}
 {warn}
 <div class=tiles>{tilehtml}</div>
 <h2>1 · Where the ion current goes</h2>
-<p class=cap>Top: MS1 survey vs MS2 fragment ion current. Bottom: of the MS2 current, how much is explained by identified peptides (teal) vs dark (orange).{" Conservative lower-bound dark (no RT boundaries)." if no_rt else ""}</p>
+<p class=cap>{"Of the MS2 ion current" if no_ms1 else "Top: MS1 survey vs MS2 fragment ion current. Bottom: of the MS2 current"}, how much is explained by identified peptides (teal) vs dark (orange).{" Conservative lower-bound dark (no RT boundaries)." if no_rt else ""}</p>
 <img src="{figs['coverage']}">
 {mapimg}
 <h2>3 · How concentrated is the dark</h2>
