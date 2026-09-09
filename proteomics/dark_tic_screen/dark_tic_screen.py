@@ -28,12 +28,171 @@ MIT licensed. Lauren Fields / PostdocToolbox.
 """
 from __future__ import annotations
 import os, sys, glob, argparse, importlib
+import xml.etree.ElementTree as _ET, base64 as _b64, zlib as _zlib
 from collections import defaultdict
 import numpy as np
 
 # --- reuse the sibling thermo_raw reader -------------------------------------------
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from thermo_raw.thermo_raw_reader import RawFile, assign_window_index  # noqa: E402
+
+
+# --- mzML reader (stdlib only): same interface as the Thermo RawFile ----------------
+def _local(tag):
+    return tag.rsplit("}", 1)[-1]
+
+
+class _MzHeader:
+    __slots__ = ("scan", "ms_level", "rt_min", "tic", "center_mz", "iso_width", "n_peaks", "inj_ms")
+
+    def __init__(self, **k):
+        for s in self.__slots__:
+            setattr(self, s, k.get(s))
+
+
+class MzMLReader:
+    """Minimal streaming mzML reader with the RawFile interface (first_scan, last_scan,
+    window_table, header(sn), peaks(sn)). Stdlib only. Assumes CENTROIDED spectra and
+    warns once if a spectrum is profile. Access is sequential (sn ascending), matching how
+    the screen/dashboard iterate scans. Handles zlib + 32/64-bit float binary arrays."""
+
+    def __init__(self, path):
+        self.path = path
+        self.first_scan = 0
+        self.last_scan = self._count() - 1
+        self._gen = None; self._cur = None; self._cur_i = -1
+        self._warned_profile = False
+
+    def __enter__(self): return self
+    def __exit__(self, *a): self.close()
+    def close(self): self._gen = None; self._cur = None
+
+    def _count(self):
+        for ev, el in _ET.iterparse(self.path, events=("start",)):
+            if _local(el.tag) == "spectrumList" and el.get("count"):
+                return int(el.get("count"))
+        n = 0
+        for ev, el in _ET.iterparse(self.path, events=("end",)):
+            if _local(el.tag) == "spectrum":
+                n += 1; el.clear()
+        return n
+
+    @staticmethod
+    def _ms_level(el):
+        for c in el.iter():
+            if _local(c.tag) == "cvParam" and c.get("accession") == "MS:1000511":
+                return int(c.get("value"))
+        return 0
+
+    @staticmethod
+    def _iso(el):
+        tgt = lo_off = hi_off = None
+        for iw in el.iter():
+            if _local(iw.tag) == "isolationWindow":
+                for c in iw:
+                    if _local(c.tag) == "cvParam":
+                        a = c.get("accession")
+                        if a == "MS:1000827": tgt = float(c.get("value"))
+                        elif a == "MS:1000828": lo_off = float(c.get("value"))
+                        elif a == "MS:1000829": hi_off = float(c.get("value"))
+                break
+        if tgt is None:
+            return None
+        return tgt, tgt - (lo_off or 0.0), tgt + (hi_off or 0.0)
+
+    def window_table(self):
+        # Collect distinct MS2 isolation windows until a target repeats = one full DIA
+        # cycle. MS1-independent (some demultiplexed mzML are MS2-only or front-load MS2).
+        wins = []; seen = set()
+        for ev, el in _ET.iterparse(self.path, events=("end",)):
+            if _local(el.tag) != "spectrum":
+                continue
+            if self._ms_level(el) == 2:
+                iso = self._iso(el)
+                if iso:
+                    tgt, lo, hi = iso
+                    key = round(tgt, 3)
+                    if key in seen: el.clear(); break
+                    seen.add(key); wins.append((lo, hi, tgt))
+            el.clear()
+        wins.sort(key=lambda w: w[2])
+        return [dict(win_idx=i, center_mz=t, width=hi - lo, lo_mz=lo, hi_mz=hi)
+                for i, (lo, hi, t) in enumerate(wins)]
+
+    def _spectra(self):
+        it = _ET.iterparse(self.path, events=("start", "end"))
+        _, root = next(it)
+        for ev, el in it:
+            if ev == "end" and _local(el.tag) == "spectrum":
+                yield el
+                el.clear(); root.clear()
+
+    def _advance_to(self, sn):
+        if self._gen is None:
+            self._gen = self._spectra()
+        while self._cur_i < sn:
+            self._cur = next(self._gen); self._cur_i += 1
+
+    def header(self, sn, with_npeaks=False, with_inj=False):
+        self._advance_to(sn)
+        el = self._cur
+        lvl = 0; rt = 0.0; tic = 0.0; center = float("nan"); width = float("nan")
+        profile = centroid = False
+        for c in el.iter():
+            if _local(c.tag) != "cvParam":
+                continue
+            a = c.get("accession")
+            if a == "MS:1000511": lvl = int(c.get("value"))
+            elif a == "MS:1000285": tic = float(c.get("value"))
+            elif a == "MS:1000016":
+                v = float(c.get("value")); un = (c.get("unitName") or "").lower()
+                rt = v / 60.0 if "second" in un else v
+            elif a == "MS:1000127": centroid = True
+            elif a == "MS:1000128": profile = True
+        if lvl == 2:
+            iso = self._iso(el)
+            if iso: center = iso[0]; width = iso[2] - iso[1]
+            if profile and not centroid and not self._warned_profile:
+                self._warned_profile = True
+                print("[dark-tic] WARNING: mzML MS2 spectra look PROFILE, not centroided; the dark "
+                      "accounting assumes centroided peaks. Peak-pick (centroid) on conversion.",
+                      file=sys.stderr)
+        return _MzHeader(scan=sn, ms_level=lvl, rt_min=rt, tic=tic, center_mz=center,
+                         iso_width=width, n_peaks=0, inj_ms=float("nan"))
+
+    def peaks(self, sn):
+        self._advance_to(sn)
+        mz = inten = None
+        for bda in self._cur.iter():
+            if _local(bda.tag) != "binaryDataArray":
+                continue
+            is_mz = is_int = False; dtype = None; zl = False; data = None
+            for c in bda:
+                lt = _local(c.tag)
+                if lt == "cvParam":
+                    a = c.get("accession")
+                    if a == "MS:1000514": is_mz = True
+                    elif a == "MS:1000515": is_int = True
+                    elif a == "MS:1000523": dtype = "<f8"
+                    elif a == "MS:1000521": dtype = "<f4"
+                    elif a == "MS:1000574": zl = True
+                elif lt == "binary":
+                    data = c.text
+            if not data or dtype is None:
+                continue
+            raw = _b64.b64decode(data)
+            if zl: raw = _zlib.decompress(raw)
+            arr = np.frombuffer(raw, dtype=np.dtype(dtype)).astype(np.float64)
+            if is_mz: mz = arr
+            elif is_int: inten = arr
+        if mz is None or inten is None:
+            return np.empty(0), np.empty(0)
+        return mz, inten
+
+
+def open_run(path):
+    """Reader for a Thermo .raw or an mzML file, exposing the same interface."""
+    return MzMLReader(path) if path.lower().endswith((".mzml",)) else RawFile(path)
 
 PROTON = 1.0072764669
 WATER = 18.0105646863
@@ -317,7 +476,7 @@ def build_window_ids(ids, wt):
 
 # --- the screen ---------------------------------------------------------------------
 def screen_run(rawpath, ids, ppm, rt_lo, rt_hi, fine=False, top=200):
-    with RawFile(rawpath) as rf:
+    with open_run(rawpath) as rf:
         wt = rf.window_table()
         by = build_window_ids(ids, wt)
         win_full = {w: np.sort(np.unique(np.concatenate([e["frag"] for e in es])))

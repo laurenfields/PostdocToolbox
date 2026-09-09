@@ -33,9 +33,9 @@ RT_BIN = 0.5   # min, for the darkness map
 
 
 def collect(rawpath, ids, ppm, no_rt, top):
-    from thermo_raw.thermo_raw_reader import RawFile, assign_window_index
+    from thermo_raw.thermo_raw_reader import assign_window_index
     import sys as _s; _s.path.insert(0, os.path.join(_HERE, ".."))
-    with RawFile(rawpath) as rf:
+    with E.open_run(rawpath) as rf:
         wt = rf.window_table()
         by = E.build_window_ids(ids, wt)
         win_full = {w: np.sort(np.unique(np.concatenate([e["frag"] for e in es])))

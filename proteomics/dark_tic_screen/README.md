@@ -88,8 +88,15 @@ drop to the fine screen only on the ones that flag high *and* have raw files ava
 
 - **Needs the raw files** for the fine and novel tiers. Skyline's `.skyd` caches only the
   extracted chromatograms of targeted transitions, not the full unassigned MS2 peaks, so
-  the dark peak content can only come from the `.raw`. The coarse tier needs only scan
+  the dark peak content can only come from the raw data. The coarse tier needs only scan
   headers (TIC per scan), so it is cheap.
+- **Accepts `.raw` (Thermo) or `.mzML`.** `.raw` is read via the `thermo_raw` reader
+  (ProteoWizard DLLs); `.mzML` via a built-in stdlib reader (no extra dependency).
+  **mzML must be centroided** (peak-picked on conversion) — the dark accounting assumes
+  centroids, and the tool warns once if a spectrum looks profile. For **overlapping /
+  staggered DIA** (e.g. `ovlp` acquisitions), prefer a **demultiplexed mzML**: demux
+  yields clean windows that every MS2 scan maps to, whereas the raw's first-cycle window
+  inference cannot resolve staggered windows (they land in the "unassigned" slice).
 - Built for **narrow-window DIA** (isolation windows inferred per file from the first
   cycle via the `thermo_raw` reader). Wide-window DIA and DDA are out of scope.
 - The delta-mass tier is a **screen, not an identification**: a fragment-level delta match
