@@ -135,6 +135,30 @@ dark concentration curve, the top unexplained features with delta-mass flags, an
 FLAG/NEGATIVE verdict. It auto-opens the page unless `--no-open`. Same `--col-*`,
 `--no-rt-gate`, `--qvalue-max`, and PRISM auto-detection as the screen.
 
+## dark_tic_cohort.py - aggregate across a whole cohort
+
+`dark_tic_cohort.py --report merged_data.parquet --raws <dir> --out cohort.html` runs the
+fast COARSE pass on every replicate in the report that has a matching raw/mzML file (in
+parallel, `--workers`) and writes one HTML that pinpoints cohort-wide trends:
+
+1. **Per-run dark fraction**, ranked - QC outliers stand out.
+2. **Cohort-mean RT x window darkness map** - bright bands are where the whole cohort is
+   consistently unassigned.
+3. **Consistency map** - the fraction of runs in which each cell is majority-dark, so a
+   systematic coverage gap (dark in every run) is distinguished from sample-specific noise.
+4. Darkest/cleanest-runs table + a per-run parquet.
+
+```bash
+python dark_tic_cohort.py --report prism_output_dir/merged_data.parquet --raws /dir/of/raws --workers 6
+python dark_tic_cohort.py --report merged_data.parquet --raws "/dir/*.mzML" --limit 8   # quick test
+```
+
+Coarse-only by design (scan headers, no peak decode), so a ~160-run cohort is a background
+job of well under an hour (~15-30 s per `.raw`; mzML slower). It needs the per-run RT peak
+boundaries (present in a PRISM/Skyline transition report). For the per-scan intensity dark
+and the unexplained-feature / delta-mass analysis on a run the cohort map flags, run
+`dark_tic_dashboard.py` on that single file.
+
 ## Dependencies
 
 - Python ≥ 3.9, `numpy`, `pyarrow`, `duckdb` (transition-report rollup), `matplotlib` (dashboard).
