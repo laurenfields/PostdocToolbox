@@ -214,11 +214,13 @@ def main():
     ap.add_argument("--qvalue-max", type=float, default=0.01, help="confident ID cutoff on the q-value column (default 0.01)")
     ap.add_argument("--no-rt-gate", action="store_true")
     ap.add_argument("--no-open", action="store_true", help="don't auto-open the HTML")
+    ap.add_argument("--replicate", default=None, help="exact Skyline ReplicateName to use (override filename matching)")
     for c in ["seq", "pmz", "pch", "rep", "start", "end"]:
         ap.add_argument(f"--col-{c}", default=None)
     a = ap.parse_args()
     cols = dict(seq=a.col_seq, pmz=a.col_pmz, pch=a.col_pch, rep=a.col_rep,
-                start=a.col_start, end=a.col_end, all_ids=a.all_ids, no_rt=a.no_rt_gate, qmax=a.qvalue_max)
+                start=a.col_start, end=a.col_end, all_ids=a.all_ids, no_rt=a.no_rt_gate,
+                qmax=a.qvalue_max, replicate=a.replicate)
     stem = os.path.splitext(os.path.basename(a.raw))[0]
     if E.is_transition_level(a.report):
         print(f"[dashboard] transition-level report (e.g. PRISM merged_data) detected -> "
@@ -228,8 +230,12 @@ def main():
         report = E.load_report(a.report, cols)
     ids = E.ids_for_raw(stem, report)
     if not ids:
-        raise SystemExit(f"[dashboard] no identifications matched raw stem '{stem}'. "
-                         f"Report replicates: {list(report)[:3]}...")
+        hint = ""
+        if E.is_transition_level(a.report):
+            reps = E.distinct_replicates(a.report)
+            hint = ("\n  Report ReplicateName values (pass the matching one with --replicate):\n    "
+                    + "\n    ".join(reps[:15]))
+        raise SystemExit(f"[dashboard] no identifications matched raw stem '{stem}'.{hint}")
     print(f"[dashboard] {stem}: {len(ids):,} IDs; reading raw + building dashboard...")
     r = collect(a.raw, ids, a.ppm, a.no_rt_gate, a.top)
     f = r["fine"]

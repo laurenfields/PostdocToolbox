@@ -114,6 +114,11 @@ Do **not** use PRISM's `corrected_*.parquet` (the rolled-up abundance matrix): i
 precursor m/z and no per-run RT boundaries, and its cells are imputed - it cannot drive the
 assigned-vs-dark accounting or the RT map.
 
+The run is matched to a `ReplicateName` by the raw filename, in either direction (the raw
+filename often carries an extra date/instrument prefix that the Skyline replicate name
+omits, or vice versa). If the filename does not disambiguate, pass the exact name with
+`--replicate "<ReplicateName>"`; on a no-match the error lists the available names.
+
 ## dark_tic_dashboard.py - one-command visual dashboard
 
 `dark_tic_dashboard.py --report <report> --raw <one .raw> --out dash.html` writes a single

@@ -257,19 +257,37 @@ def report_from_transitions(path, target_stem, cols):
                 qcol = low[c]; break
     qmax = cols.get("qmax", 0.01)
     qflt = f'AND "{qcol}" <= {qmax}' if qcol else ""   # confident = q at or below threshold
+    replicate = cols.get("replicate")
     con = duckdb.connect(); con.execute("PRAGMA threads=4")
+    if replicate:                                     # explicit --replicate: exact match
+        wsql = f'"{rep}" = ?'; wp = [replicate]
+    else:                                             # match either direction: the raw
+        wsql = (f'("{rep}" = ? OR "{rep}" LIKE ? OR ? LIKE (\'%\' || "{rep}" || \'%\'))')
+        wp = [target_stem, f"%{target_stem}%", target_stem]  # filename may prefix/suffix the replicate name
     rows = con.execute(f'''
         SELECT "{seq}" AS seq, CAST("{pch}" AS INTEGER) AS pch,
                any_value("{pmz}") AS pmz, min("{st}") AS start, max("{en}") AS en
         FROM read_parquet(?)
-        WHERE ("{rep}" = ? OR "{rep}" LIKE ?) {qflt}
+        WHERE {wsql} {qflt}
           AND "{st}" IS NOT NULL AND "{en}" IS NOT NULL
         GROUP BY "{seq}", "{pch}"''',
-        [path, target_stem, f"%{target_stem}%"]).fetchall()
+        [path] + wp).fetchall()
     con.close()
     out = {target_stem: [dict(mod_seq=r[0], pch=int(r[1]), pmz=float(r[2]),
                               start=float(r[3]), end=float(r[4])) for r in rows]}
     return out
+
+
+def distinct_replicates(path, limit=30):
+    """Distinct ReplicateName values in a transition report (for error messages)."""
+    import duckdb, pyarrow.parquet as pq
+    names = pq.read_schema(path).names
+    low = {n.lower(): n for n in names}
+    rep = next((low[c] for c in ("replicatename", "filename", "run") if c in low), names[0])
+    con = duckdb.connect()
+    vals = [r[0] for r in con.execute(
+        f'SELECT DISTINCT "{rep}" FROM read_parquet(?) LIMIT {limit}', [path]).fetchall()]
+    con.close(); return vals
 
 
 def ids_for_raw(stem, report):
@@ -406,7 +424,8 @@ def main():
     a = ap.parse_args()
     rt_lo, rt_hi = (float(x) for x in a.rt_range.split(","))
     cols = dict(seq=a.col_seq, pmz=a.col_pmz, pch=a.col_pch, rep=a.col_rep,
-                start=a.col_start, end=a.col_end, all_ids=a.all_ids, no_rt=a.no_rt_gate, qmax=a.qvalue_max)
+                start=a.col_start, end=a.col_end, all_ids=a.all_ids, no_rt=a.no_rt_gate,
+                qmax=a.qvalue_max, replicate=a.replicate)
 
     tx = is_transition_level(a.report)          # e.g. PRISM merged_data (transition-level)
     report = None if tx else load_report(a.report, cols)
