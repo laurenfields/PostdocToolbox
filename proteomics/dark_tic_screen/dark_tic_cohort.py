@@ -157,6 +157,37 @@ def figures(runs, cohort, centers):
             ax.set_xlabel("retention time (min)"); ax.set_ylabel("isolation-window m/z")
             cb = fig.colorbar(im, ax=ax); cb.set_label(lab)
             out[key] = _png(fig)
+        # --- absolute dark-CURRENT views (inverse emphasis: where the dark bulk is) ---
+        nrun = max((c[2] for c in cohort.values()), default=1)
+        dgrid = np.full((len(wins), len(rbs)), np.nan)
+        mz_dark = np.zeros(len(wins)); rt_dark = np.zeros(len(rbs)); rt_tot = np.zeros(len(rbs))
+        for (rb, w), (tic, dk, nr, nd) in cohort.items():
+            if w in wi:
+                dgrid[wi[w], ri[rb]] = dk / max(nr, 1)
+                mz_dark[wi[w]] += dk; rt_dark[ri[rb]] += dk; rt_tot[ri[rb]] += tic
+        with np.errstate(divide="ignore"):
+            lg = np.log10(np.where(dgrid > 0, dgrid, np.nan))
+        fig, ax = plt.subplots(figsize=(7.2, 3.4))
+        im = ax.imshow(lg, aspect="auto", origin="lower", cmap="viridis", extent=ext)
+        ax.set_xlabel("retention time (min)"); ax.set_ylabel("isolation-window m/z")
+        cb = fig.colorbar(im, ax=ax); cb.set_label("log10 mean dark ion current / run")
+        out["darkcurrent"] = _png(fig)
+        cen = np.array([centers[w] for w in wins])
+        fig, ax = plt.subplots(figsize=(6.6, 2.5))
+        ax.fill_between(cen, mz_dark / nrun, color=ORANGE)
+        ax.set_xlabel("isolation-window m/z"); ax.set_ylabel("mean dark current / run")
+        ax.set_title("Dark current by m/z window", fontsize=11)
+        for sp in ("top", "right"): ax.spines[sp].set_visible(False)
+        out["profile_mz"] = _png(fig)
+        rtm = np.array([rb * RT_BIN for rb in rbs])
+        fig, ax = plt.subplots(figsize=(6.6, 2.5))
+        ax.fill_between(rtm, rt_tot / nrun, color="#D9D5E6", label="total MS2")
+        ax.fill_between(rtm, rt_dark / nrun, color=ORANGE, label="dark")
+        ax.set_xlabel("retention time (min)"); ax.set_ylabel("mean MS2 current / run")
+        ax.set_title("Dark vs total current over the gradient", fontsize=11)
+        ax.legend(frameon=False, fontsize=8)
+        for sp in ("top", "right"): ax.spines[sp].set_visible(False)
+        out["profile_rt"] = _png(fig)
     return out
 
 
@@ -175,6 +206,12 @@ def html(runs, figs, report, n_reps, n_matched):
              ("median unassigned", f"{np.median(un):.1f}%")]
     tilehtml = "".join(f'<div class=tile><div class=big>{v}</div><div class=lab>{k}</div></div>' for k, v in tiles)
     cons = f'<h2>3 · Darkness consistency</h2><p class=cap>Fraction of runs in which each RT x window cell is majority-dark. Cells near 1.0 (bright) are dark in <b>every</b> run - systematic coverage gaps, not sample noise.</p><img src="{figs["consistency"]}">' if "consistency" in figs else ""
+    darkc = (f'<h2>5 &middot; Where the dark current actually is (inverse view)</h2>'
+             f'<p class=cap>The maps above are dark <b>fraction</b>, where the void and wash look dark but carry little current. '
+             f'These show the absolute dark ion <b>current</b> (mean per run): the log map locates the dark bulk, and the profiles '
+             f'show how that dark current distributes across the m/z windows and across the gradient (orange = dark, grey = total MS2).</p>'
+             f'<img src="{figs["darkcurrent"]}">'
+             f'<div style="display:flex;gap:10px;margin-top:10px"><img src="{figs["profile_mz"]}"><img src="{figs["profile_rt"]}"></div>') if "darkcurrent" in figs else ""
     mapimg = f'<h2>2 · Cohort-mean darkness map</h2><p class=cap>Mean dark fraction of scan TIC across retention time (x) and isolation-window m/z (y), averaged over all runs. Bright bands are where the cohort is consistently unassigned.</p><img src="{figs["map"]}">' if "map" in figs else ""
     return f"""<!doctype html><meta charset=utf8><title>Dark-TIC cohort</title>
 <style>
@@ -198,6 +235,7 @@ th{{color:#64607A;font-size:11px;text-transform:uppercase}} td:nth-child(n+2){{f
 <img src="{figs['perrun']}">
 {mapimg}
 {cons}
+{darkc}
 <h2>4 &middot; Darkest and cleanest runs</h2>
 <table><tr><th>run</th><th>dark</th><th>unassigned</th><th>IDs</th><th>MS2 scans</th></tr>{top}{('<tr><td colspan=5 style=color:#B8B4C4>...</td></tr>'+bot) if bot else ''}</table>
 <p class=note>dark-tic-cohort (PostdocToolbox). Coarse tier only: dark = MS2 scans with no confident ID (q&le;threshold) eluting in their isolation window, RT-gated to Skyline peak boundaries. Header-only, no peak decode. For per-scan intensity dark + unexplained features on a run of interest, use dark_tic_dashboard.py.</p>
@@ -258,12 +296,23 @@ def main():
     print(f"[cohort] {len(runs)} runs aggregated in {(time.time()-t0)/60:.1f} min -> {a.out}")
     try:
         import pyarrow as pa, pyarrow.parquet as pq
+        base = os.path.splitext(a.out)[0]
         pq.write_table(pa.table({"run": [r["rep"] for r in runs],
                                  "dark_frac": [r["dark_frac"] for r in runs],
                                  "unassigned_frac": [r["un_frac"] for r in runs],
                                  "n_ids": [r["n_ids"] for r in runs],
                                  "n_ms2": [r["n_ms2"] for r in runs]}),
-                       os.path.splitext(a.out)[0] + "_perrun.parquet")
+                       base + "_perrun.parquet")
+        keys = sorted(cohort)                                   # aggregated RT x window grid
+        pq.write_table(pa.table({
+            "rt_min": [rb * RT_BIN for rb, w in keys],
+            "win_idx": [w for rb, w in keys],
+            "win_center_mz": [centers.get(w, float("nan")) for rb, w in keys],
+            "tic": [cohort[k][0] for k in keys],
+            "dark_tic": [cohort[k][1] for k in keys],
+            "n_runs": [cohort[k][2] for k in keys],
+            "n_dark_runs": [cohort[k][3] for k in keys]}),
+            base + "_grid.parquet")
     except Exception:
         pass
     if not a.no_open:

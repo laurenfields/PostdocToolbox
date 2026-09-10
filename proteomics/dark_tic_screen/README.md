@@ -147,6 +147,11 @@ parallel, `--workers`) and writes one HTML that pinpoints cohort-wide trends:
 3. **Consistency map** - the fraction of runs in which each cell is majority-dark, so a
    systematic coverage gap (dark in every run) is distinguished from sample-specific noise.
 4. Darkest/cleanest-runs table + a per-run parquet.
+5. **Where the dark current actually is** (inverse view): the maps above are dark
+   *fraction* (the void and wash look dark but carry little current); this section shows
+   the absolute dark ion *current* - a log map of the dark bulk plus dark-current-by-m/z
+   and dark-vs-total-over-the-gradient profiles. Also writes the aggregated RT x window
+   grid to `<out>_grid.parquet` so you can replot or stats-test it without re-running.
 
 ```bash
 python dark_tic_cohort.py --report prism_output_dir/merged_data.parquet --raws /dir/of/raws --workers 6
@@ -158,6 +163,26 @@ job of well under an hour (~15-30 s per `.raw`; mzML slower). It needs the per-r
 boundaries (present in a PRISM/Skyline transition report). For the per-scan intensity dark
 and the unexplained-feature / delta-mass analysis on a run the cohort map flags, run
 `dark_tic_dashboard.py` on that single file.
+
+## dark_tic_compose.py - what the dark is made of (fine tier, subset)
+
+Where the cohort tool says *where* the dark is, `dark_tic_compose.py` says *what* it is.
+It runs the fine tier (per-scan peak decode) on a small subset of runs and aggregates:
+
+1. **Mass-defect band** - a 2D density of the dark peaks (m/z vs fractional mass). Peptidic
+   ions form a tight diagonal band (the dashed averagine guide); chemical/polymer signal
+   sits off it. The single most telling "is the dark real peptide?" view.
+2. **Concentration** - a few big features vs a diffuse low-abundance haze.
+3. **Unexplained features recurring across runs** - reproducible dark species (not an ID
+   fragment at another RT), with a delta-mass to a known modification.
+
+```bash
+python dark_tic_compose.py --report merged_data.parquet --raws /dir --subset 3           # 3 patient runs
+python dark_tic_compose.py --report merged_data.parquet --raws /dir --runs stemA,stemB    # specific runs
+```
+
+This is the expensive tier (~10 min/run of peak decode), so keep the subset small (default
+3). Use it on the runs, windows, or RT bands the cohort map flags as interesting.
 
 ## Dependencies
 
